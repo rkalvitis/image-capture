@@ -1,0 +1,37 @@
+<launch>
+
+  <arg name="iface" default=""/>
+  <arg name="timeout" default="5.0"/>
+  <arg name="frame_id" default="world"/>
+  <arg name="publish_tf" default="true"/>
+  <arg name="child_frame_id" default="NAME"/>
+  <arg name="root_frame_id" default="NAME"/>
+  <arg name="sync" default="true"/>
+  <arg name="restamp" default="false"/>
+  <arg name="diagnostics" default="false"/>
+  <arg name="publish_data" default="false"/>
+  <arg name="publish_description" default="false"/>
+  <arg name="topic" default="/optitrack/NAME"/>
+  <arg name="project_to_2d" default="false"/>
+
+  <node pkg="optitrack_ros_py" exec="optitrack_ros" name="optitrack_ros" output="screen">
+    <param name="iface" value="$(var iface)"/>
+    <param name="timeout" value="$(var timeout)"/>
+    <param name="sync" value="$(var sync)"/>
+    <param name="restamp" value="$(var restamp)"/>
+    <param name="diagnostics" value="$(var diagnostics)"/>
+    <param name="publish_data" value="$(var publish_data)"/>
+    <param name="publish_description" value="$(var publish_description)"/>
+    <param name="rigid_bodies">
+      <param name="default">
+        <param name="enabled" value="true"/>
+        <param name="topic" value="$(var topic)"/>
+        <param name="frame_id" value="$(var child_frame_id)"/>
+        <param name="root_frame_id" value="$(var root_frame_id)"/>
+        <param name="tf" value="$(var publish_tf)"/>
+        <param name="project_to_2d" value="$(var project_to_2d)"/>
+      </param>
+    </param>
+  </node>
+
+</launch>

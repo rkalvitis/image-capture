@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>optitrack_listener</name>
+  <version>0.1.0</version>
+  <description>Example subscriber for the /optitrack/&lt;rigid_body&gt; topics published by optitrack_ros_py.</description>
+  <maintainer email="luca.crupi@icloud.com">Luca Crupi</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <!-- optitrack_ros_py is not in rosdistro, so we don't list it as a rosdep.
+       It's cloned + built alongside this package in the Dockerfile. -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

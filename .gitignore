@@ -1,0 +1,12 @@
+build/
+install/
+log/
+.pixi/
+*.pyc
+__pycache__/
+
+# pip build metadata
+*.egg-info/
+
+# macOS
+.DS_Store
