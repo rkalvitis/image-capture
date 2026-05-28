@@ -68,10 +68,86 @@ The driver reads three env vars (lab defaults shown):
 | `MY_IP`              | `192.168.201.89`  |
 | `OPTITRACK_FRAME_ID` | `world`           |
 
-Override per-run:
+### Find the OptiTrack PC IP (on the Windows Motive machine)
+
+In a Windows `cmd` / PowerShell:
+
+```cmd
+ipconfig
+```
+
+Look for the **Ethernet adapter** on the lab LAN (subnet `192.168.201.X`)
+and read its `IPv4 Address`. That's `OPTITRACK_PC_IP`. The same value is
+shown in Motive under **Data Streaming Pane → Local Interface**.
+
+### Find the OptiTrack PC IP from a client (no Windows access needed)
+
+Motive answers NatNet discovery broadcasts. From your Mac or Linux box
+on the same LAN, with the env installed:
 
 ```bash
-OPTITRACK_PC_IP=192.168.201.6 pixi run launch
+pixi run python -m natnet_py.natnet_discover
+```
+
+Output looks like:
+
+```
+------------------------------------------------------------
+192.168.201.5:1510
+    Motive using NatNet version 4.1.0.0
+    unicast data stream on :1511
+------------------------------------------------------------
+```
+
+The IP on the first line is `OPTITRACK_PC_IP`. If discovery finds nothing,
+fall back to scanning the lab subnet:
+
+```bash
+# macOS / Linux — show all live hosts on 192.168.201.0/24
+nmap -sn 192.168.201.0/24            # if nmap is installed
+# or, after pinging the broadcast once:
+arp -a | grep 192.168.201            # macOS / Linux
+ip neigh show | grep 192.168.201     # Linux only
+```
+
+### Find your Mac IP (on the lab LAN interface)
+
+Plug into the lab Ethernet, then in a terminal:
+
+```bash
+# All interfaces with an IPv4 address on the lab subnet
+ifconfig | grep "inet 192.168.201"
+```
+
+Or, if you know the interface name (usually `en0` for Wi-Fi, `en6`/`en7`
+for a USB-Ethernet adapter — check `networksetup -listallhardwareports`):
+
+```bash
+ipconfig getifaddr en7
+```
+
+That address is `MY_IP`.
+
+### Find your Linux PC IP (on the lab LAN interface)
+
+```bash
+# All interfaces with an IPv4 address on the lab subnet
+ip -4 addr show | grep "inet 192.168.201"
+```
+
+Or, if you know the interface name (list them with `ip -br link`, usually
+`eth0`/`enp3s0` for built-in Ethernet, `enx...` for a USB adapter):
+
+```bash
+ip -4 addr show dev enp3s0 | awk '/inet /{print $2}' | cut -d/ -f1
+```
+
+That address is `MY_IP`.
+
+### Override per-run
+
+```bash
+OPTITRACK_PC_IP=192.168.201.6 MY_IP=192.168.201.42 pixi run launch
 ```
 
 ## Edit your code
