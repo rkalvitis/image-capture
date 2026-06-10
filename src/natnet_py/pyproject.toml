@@ -85,3 +85,16 @@ natnet = 'natnet_py.natnet_main:main'
 [tool.mypy]
 implicit_reexport = true
 ignore_missing_imports = true
+
+[tool.pixi.package]
+name = "natnet_py"
+version = "0.1.0"
+
+[tool.pixi.package.host-dependencies]
+setuptools = ">=61.0"
+wheel = "*"
+setuptools-git-versioning = ">=2.0,<3"
+
+[tool.pixi.package.build.backend]
+name = "pixi-build-python"
+version = "0.5.*"

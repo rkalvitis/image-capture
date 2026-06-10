@@ -1,16 +1,17 @@
-# OptiTrack → ROS 2 on Mac
+# OptiTrack → ROS 2
 
-Native macOS setup for receiving OptiTrack/Motive NatNet data as ROS 2
-topics, using [pixi](https://pixi.sh) + RoboStack ROS 2 Humble.
+Setup for receiving OptiTrack/Motive NatNet data as ROS 2 topics on macOS
+(Apple Silicon) and Linux (aarch64), using [pixi](https://pixi.sh) +
+RoboStack ROS 2 Humble.
 
 ## Install
 
 ```bash
-# 1. Install pixi (once per Mac)
-curl -fsSL https://pixi.sh/install.sh | bash
+# 1. Install pixi (once per machine)
+curl -fsSL https://pixi.sh/install.sh | bash   # macOS / Linux
 
 # 2. Clone this repo (NOT into iCloud Drive — must be a local-disk path with no spaces)
-git clone <repo-url> ~/optitrack
+git clone --recursive <repo-url> ~/optitrack
 
 # 3. Resolve and install the env (~10 min; downloads ROS 2 Humble)
 cd ~/optitrack
@@ -50,13 +51,13 @@ In a second terminal:
 
 ```bash
 cd ~/optitrack
-pixi run rviz2
+pixi run rviz-optitrack
 ```
 
 Inside RViz: set **Global Options → Fixed Frame** to `world`, then
 **Add → By topic → /tf → TF** and **Add → By topic → /optitrack/<name> → PoseStamped**.
 Save the layout via **File → Save Config As… → `rviz/optitrack.rviz`**
-and from then on use `pixi run rviz` to reload it.
+and from then on use `pixi run rviz-optitrack` to reload it.
 
 ## Override defaults
 
@@ -154,4 +155,9 @@ OPTITRACK_PC_IP=192.168.201.6 MY_IP=192.168.201.42 pixi run launch
 
 Your subscriber:
 [`src/optitrack_listener/optitrack_listener/listener.py`](src/optitrack_listener/optitrack_listener/listener.py).
-Edit it, then `pixi run launch` again.
+Edit it, then re-run:
+
+```bash
+pixi install   # rebuilds changed packages
+pixi run launch
+```

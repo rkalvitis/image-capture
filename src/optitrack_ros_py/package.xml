@@ -7,7 +7,11 @@
   <maintainer email="jerome@idsia.ch">jerome.guzzi</maintainer>
   <license>TODO: License declaration</license>
 
-  <depend>natnet_py</depend>
+  <!-- natnet_py is not listed here: pixi-build-ros resolves <depend> entries as
+       conda packages (ros-humble-natnet_py), but natnet_py is a local workspace
+       package not published to any channel. Pixi handles the ordering instead. -->
+  <!-- <depend>natnet_py</depend> -->
+
   <depend>rclpy</depend>
   <depend>python_orocos_kdl_vendor</depend>
 
