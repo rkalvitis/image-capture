@@ -1,14 +1,20 @@
 [workspace]
-authors = ["Luca Crupi <luca.crupi@icloud.com>"]
+authors = ["Luca Crupi <luca.crupi@icloud.com>", "Elia Cereda <elia.cereda@gmail.com>"]
 channels = ["conda-forge"]
 name = "optitrack"
-platforms = ["osx-arm64"]
+platforms = ["osx-arm64", "linux-aarch64"]
 version = "0.1.0"
 
 # ──────────────────────────────────────────────────────────────────────────
 # Feature: optitrack
-#   Conda deps (ROS 2 Humble via RoboStack) + PyPI deps (natnet_py & the
-#   optitrack_msgs stub installed editable from src/).
+#   Conda deps (ROS 2 Humble via RoboStack) + PyPI deps (natnet_py installed
+#   editable from src/). The ament_python / ament_cmake packages under src/ are
+#   colcon-built (see the `build` task), not pip-installed.
+#
+#   NB: Python is pinned to 3.11 — the Orbbec camera SDK (pyorbbecsdk) ships no
+#   wheel past cp311. This is why the workspace stays on the colcon build model
+#   rather than master's pixi-build model, which would force the ROS distro to
+#   Python 3.12 (via ros2-distro-mutex) and make pyorbbecsdk unsatisfiable.
 # ──────────────────────────────────────────────────────────────────────────
 [feature.optitrack]
 channels = ["conda-forge", "robostack-humble"]
@@ -20,46 +26,55 @@ ros-humble-tf2-ros = "*"
 ros-humble-tf2-geometry-msgs = "*"
 ros-humble-python-orocos-kdl-vendor = "*"
 ros-humble-rviz2 = "*"
+# Needed to colcon-build the optitrack_msgs interface package (msg/*.msg).
+# numpy is required by rosidl_generator_py's find_package(Python ... NumPy).
+ros-humble-rosidl-default-generators = "*"
+numpy = "*"
 colcon-common-extensions = "*"
 compilers = "*"
-cmake = "*"
+# cmake pinned <4: ROS 2 Humble's rosidl_generator_py (used to build the
+# optitrack_msgs interface package) relies on Python-finding cmake modules that
+# cmake 4 removed (policy CMP0148), breaking message generation.
+cmake = ">=3.16,<4"
 pkg-config = "*"
 make = "*"
 ninja = "*"
 git = "*"
 pip = "*"
+# PNG writing in scripts/export_dataset.py (16-bit depth + RGB).
+pillow = ">=10"
 
 [feature.optitrack.pypi-dependencies]
 # natnet_py: Jerome Guzzi's pure-Python NatNet client. Editable install from
 # src/ so the (one-line) patch in scripts/patch_natnet.py stays applied.
 natnet_py = { path = "src/natnet_py", editable = true }
-# Stub for the unpublished `optitrack_msgs` ROS package that
-# optitrack_ros_py imports unconditionally. Satisfies the import; the
-# real message classes are only used when `publish_description` /
-# `publish_data` are on (they default to off).
-optitrack_msgs = { path = "src/optitrack_msgs_stub", editable = true }
 # Runtime dep of natnet_py — also pulled in transitively, listed here for clarity.
 netifaces = ">=0.11"
-# Orbbec Femto Mega SDK — universal2 wheel works on macOS arm64 + Python 3.11
-pyorbbecsdk = ">=1.3.2"
-# PNG writing in scripts/export_dataset.py (16-bit depth + RGB)
-pillow = ">=10"
-# NB: optitrack_ros_py and optitrack_listener are NOT listed here. They're
-# ament_python ROS 2 packages; pip's editable install would skip their
-# data_files (PEP 660), and without those the ament_index has no record
-# of them and `ros2 launch` can't find them. Instead we colcon-build them
-# via the implicit `build` task that `launch` depends on — same effect,
-# but data_files end up in the right place.
+# NB: optitrack_ros_py, optitrack_listener, orbbec_camera_ros and the real
+# optitrack_msgs package are NOT listed here. They're ament ROS 2 packages;
+# pip's editable install would skip their data_files / message generation, so
+# the ament_index would have no record of them and `ros2 launch` couldn't find
+# them. Instead they're colcon-built via the implicit `build` task that
+# `launch`/`camera`/`record` depend on — data_files land in the right place.
 
-# All ROS nodes run on this Mac (NatNet to the OptiTrack PC is plain UDP, not
-# DDS). Off the lab LAN, CycloneDDS binds the wrong interface and local nodes
-# never discover each other (empty bags, hanging `ros2 topic list`) — pinning
-# DDS to loopback fixes that everywhere.
-[activation.env]
-ROS_LOCALHOST_ONLY = "1"
+# Orbbec Femto Mega SDK — universal2 wheel, published for macOS arm64 only
+# (cp36–cp311, no cp312). Scoped to osx-arm64 so the linux-aarch64 environment
+# stays resolvable; the camera pipeline is macOS-only anyway.
+[feature.optitrack.target.osx-arm64.pypi-dependencies]
+pyorbbecsdk = ">=1.3.2"
 
 [environments]
 default = { features = ["optitrack"] }
+
+# Lab defaults for the OptiTrack driver. ROS_LOCALHOST_ONLY: all ROS nodes run
+# on this Mac (NatNet to the OptiTrack PC is plain UDP, not DDS). Off the lab
+# LAN, CycloneDDS binds the wrong interface and local nodes never discover each
+# other (empty bags, hanging `ros2 topic list`) — pinning DDS to loopback fixes
+# that everywhere.
+[feature.optitrack.activation.env]
+OPTITRACK_PC_IP = "192.168.201.5"
+MY_IP = "192.168.201.89"
+ROS_LOCALHOST_ONLY = "1"
 
 # ──────────────────────────────────────────────────────────────────────────
 # Tasks
@@ -75,7 +90,7 @@ default = { features = ["optitrack"] }
 #   pixi run record-mock        — same pipeline with synthetic data (no hardware)
 #   pixi run export -- <bag>    — bag → PNGs + per-frame pose CSV
 #   pixi run setup-usb-perms    — one-time grant of passwordless sudo for record
-#   pixi run rviz               — launch RViz with saved config
+#   pixi run rviz-optitrack     — launch RViz with saved config
 # ──────────────────────────────────────────────────────────────────────────
 [tasks.patch-natnet]
 description = "(implementation detail of `build`) idempotent natnet_py upstream fix."
@@ -83,7 +98,12 @@ cmd = "python scripts/patch_natnet.py"
 
 [tasks.build]
 description = "(implementation detail of `launch`) colcon build the ROS 2 workspace."
-cmd = "colcon build"
+# The -DPython*_EXECUTABLE hints are needed by optitrack_msgs' message
+# generation: rosidl_generator_py runs FindPythonExtra before FindPython, which
+# leaves the modern find_package(Python) unable to locate the conda interpreter
+# on macOS unless the path is given explicitly. Harmless for the ament_python
+# packages, which ignore cmake args.
+cmd = "bash -c 'colcon build --cmake-args -DPython3_EXECUTABLE=\"$CONDA_PREFIX/bin/python\" -DPython_EXECUTABLE=\"$CONDA_PREFIX/bin/python\" -DPYTHON_EXECUTABLE=\"$CONDA_PREFIX/bin/python\"'"
 depends-on = ["patch-natnet"]
 
 [tasks.launch]
@@ -119,6 +139,6 @@ cmd = "python scripts/export_dataset.py"
 description = "One-time: grant passwordless sudo so 'pixi run record' works without a password prompt."
 cmd = "sudo bash scripts/setup_usb_permissions.sh"
 
-[tasks.rviz]
+[tasks.rviz-optitrack]
 description = "Launch RViz with the saved Optitrack config."
 cmd = "rviz2 -d rviz/optitrack.rviz"

@@ -1,0 +1,3 @@
+[submodule "src/optitrack_msgs"]
+	path = src/optitrack_msgs
+	url = git@github.com:jeguzzi/optitrack_msgs.git
