@@ -9,7 +9,11 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/optitrack.launch.py']),
+        ('share/' + package_name + '/launch', [
+            'launch/optitrack.launch.py',
+            'launch/record.launch.py',
+            'launch/camera.launch.py',
+        ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'listener = optitrack_listener.listener:main',
+            'mock_pose_publisher = optitrack_listener.mock_pose_publisher:main',
         ],
     },
 )

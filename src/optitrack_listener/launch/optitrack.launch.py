@@ -3,6 +3,9 @@ our example listener in one shot.
 
 Native macOS variant: reads OPTITRACK_PC_IP / MY_IP / OPTITRACK_FRAME_ID
 from the environment (set by run.sh), with lab-default fallbacks.
+
+For dataset recording (OptiTrack + Orbbec camera + rosbag) use instead:
+  sudo pixi run record   →   record.launch.py
 """
 
 import os
@@ -11,9 +14,27 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 
 
+def _default_client_ip(server: str) -> str:
+    """Local IP the OS would use to reach the Motive PC.
+
+    A UDP connect() sends no packets but makes the kernel pick the outbound
+    interface — so the NatNet socket binds to the right NIC without the user
+    having to export MY_IP.
+    """
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((server, 1510))
+        return s.getsockname()[0]
+    except OSError:
+        return '192.168.201.89'
+    finally:
+        s.close()
+
+
 def generate_launch_description():
     server = os.environ.get('OPTITRACK_PC_IP', '192.168.201.5')
-    client = os.environ.get('MY_IP', '192.168.201.89')
+    client = os.environ.get('MY_IP') or _default_client_ip(server)
     frame = os.environ.get('OPTITRACK_FRAME_ID', 'world')
 
     # `client_address` is the LOCAL socket bind address (natnet_py

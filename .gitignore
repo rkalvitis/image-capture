@@ -10,3 +10,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# rosbag datasets (large binary files)
+datasets/

@@ -44,6 +44,40 @@ That's the only command needed every session. Output once connected:
 [optitrack_listener]: [GATE] pos=(+0.206, -0.213, +1.420) quat=(...)
 ```
 
+## Record a dataset (camera + pose)
+
+Goal: a moving, marker-equipped Orbbec Femto Mega films a fixed object; every
+frame gets the camera's OptiTrack pose at its *capture* time.
+
+```bash
+# One-time: passwordless sudo for the camera (macOS UVC driver needs root)
+sudo bash scripts/setup_usb_permissions.sh
+
+# Record (Ctrl-C to stop). Bag lands in datasets/optitrack_<timestamp>/
+sudo pixi run record
+
+# Export frames + per-frame interpolated pose
+pixi run export -- datasets/optitrack_<timestamp> --rigid-body <MotiveBodyName>
+```
+
+Export writes `color/*.png`, `depth/*.png` (16-bit, millimetres),
+`camera_info.yaml`, and `frames.csv` with one row per color frame:
+capture timestamp, interpolated position + quaternion of the camera body,
+and data-quality columns (`pose_gap_ms`, `depth_dt_ms`).
+
+Lag handling: camera frames are stamped with the Orbbec hardware capture
+timestamp (USB transfer lag removed) and OptiTrack poses with NatNet
+clock-synced mid-exposure time (network lag removed). If you still measure a
+residual constant offset in the lab, cancel it at export time with
+`--time-offset <seconds>` — no re-recording needed.
+
+Test the whole pipeline without any hardware:
+
+```bash
+pixi run record-mock     # synthetic camera frames + synthetic trajectory
+pixi run export -- datasets/optitrack_<timestamp>
+```
+
 ## Visualize (optional)
 
 In a second terminal:

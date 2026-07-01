@@ -40,6 +40,10 @@ natnet_py = { path = "src/natnet_py", editable = true }
 optitrack_msgs = { path = "src/optitrack_msgs_stub", editable = true }
 # Runtime dep of natnet_py — also pulled in transitively, listed here for clarity.
 netifaces = ">=0.11"
+# Orbbec Femto Mega SDK — universal2 wheel works on macOS arm64 + Python 3.11
+pyorbbecsdk = ">=1.3.2"
+# PNG writing in scripts/export_dataset.py (16-bit depth + RGB)
+pillow = ">=10"
 # NB: optitrack_ros_py and optitrack_listener are NOT listed here. They're
 # ament_python ROS 2 packages; pip's editable install would skip their
 # data_files (PEP 660), and without those the ament_index has no record
@@ -47,14 +51,31 @@ netifaces = ">=0.11"
 # via the implicit `build` task that `launch` depends on — same effect,
 # but data_files end up in the right place.
 
+# All ROS nodes run on this Mac (NatNet to the OptiTrack PC is plain UDP, not
+# DDS). Off the lab LAN, CycloneDDS binds the wrong interface and local nodes
+# never discover each other (empty bags, hanging `ros2 topic list`) — pinning
+# DDS to loopback fixes that everywhere.
+[activation.env]
+ROS_LOCALHOST_ONLY = "1"
+
 [environments]
 default = { features = ["optitrack"] }
 
 # ──────────────────────────────────────────────────────────────────────────
 # Tasks
-#   pixi run patch-natnet  — idempotent one-line fix to natnet_py
-#   pixi run launch        — start driver + listener (builds first)
-#   pixi run rviz          — launch RViz with saved config
+#   pixi run patch-natnet       — idempotent one-line fix to natnet_py
+#   pixi run build              — colcon build the ROS 2 workspace
+#   pixi run launch             — start driver + listener (no camera, no bag)
+#   pixi run camera             — start ONLY the Orbbec camera node
+#                                 NOTE: requires root, like `record`
+#   pixi run record             — start driver + camera + rosbag recording
+#                                 NOTE: requires root (macOS UVC driver conflict)
+#                                 First time: sudo pixi run record
+#                                 After setup-usb-perms: pixi run record
+#   pixi run record-mock        — same pipeline with synthetic data (no hardware)
+#   pixi run export -- <bag>    — bag → PNGs + per-frame pose CSV
+#   pixi run setup-usb-perms    — one-time grant of passwordless sudo for record
+#   pixi run rviz               — launch RViz with saved config
 # ──────────────────────────────────────────────────────────────────────────
 [tasks.patch-natnet]
 description = "(implementation detail of `build`) idempotent natnet_py upstream fix."
@@ -69,6 +90,34 @@ depends-on = ["patch-natnet"]
 description = "Run the OptiTrack driver + example listener (builds automatically if needed)."
 cmd = "bash -c 'source install/setup.bash && ros2 launch optitrack_listener optitrack.launch.py'"
 depends-on = ["build"]
+
+[tasks.camera]
+description = "Run only the Orbbec Femto Mega camera node (no OptiTrack, no bag). Needs root (see setup-usb-perms)."
+# Same chown trick as `record`: hand root-owned build artifacts back to the
+# real user so the next non-sudo build doesn't fail with EPERM.
+cmd = "bash -c 'source install/setup.bash && ros2 launch optitrack_listener camera.launch.py; [ -n \"${SUDO_USER:-}\" ] && chown -R \"$SUDO_USER\" build install log || true'"
+depends-on = ["build"]
+
+[tasks.record]
+description = "Record OptiTrack poses + Orbbec camera to a rosbag. Needs root (see setup-usb-perms)."
+# The trailing chown hands everything the root process touched (bag, colcon
+# build artifacts, logs) back to the real user — otherwise the next non-sudo
+# build fails with EPERM on root-owned files.
+cmd = "bash -c 'source install/setup.bash && ros2 launch optitrack_listener record.launch.py; [ -n \"${SUDO_USER:-}\" ] && chown -R \"$SUDO_USER\" build install log datasets || true'"
+depends-on = ["build"]
+
+[tasks.record-mock]
+description = "Test the recording pipeline with synthetic camera + pose data (no hardware, no sudo)."
+cmd = "bash -c 'source install/setup.bash && MOCK_RECORD=1 ros2 launch optitrack_listener record.launch.py'"
+depends-on = ["build"]
+
+[tasks.export]
+description = "Export a recorded bag to PNGs + per-frame pose CSV. Usage: pixi run export -- datasets/<bag> [--rigid-body NAME] [--time-offset SEC]"
+cmd = "python scripts/export_dataset.py"
+
+[tasks.setup-usb-perms]
+description = "One-time: grant passwordless sudo so 'pixi run record' works without a password prompt."
+cmd = "sudo bash scripts/setup_usb_permissions.sh"
 
 [tasks.rviz]
 description = "Launch RViz with the saved Optitrack config."
