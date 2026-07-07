@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""Match iPhone photos to OptiTrack poses via EXIF timestamps.
+
+Consumes a session folder produced per docs/IPHONE_IMPLEMENTATION_PLAN.md:
+
+    datasets/phone_<ts>/
+      <rosbag files>       poses-only bag from `pixi run record-poses`
+      photos/*.dng         the dataset shots (ProRAW)
+      clock/*.dng          clock photos (session start + end)
+
+and writes frames.csv (one row per matched photo: median pose over the still
+window around its capture time) plus rejected.csv (photos with no still
+window — the phone was moving, or pose data is missing).
+
+Clock offset: the iPhone clock is not the Mac clock. Photograph the
+`pixi run ms-clock` display at session start/end and pass the time visible
+in each clock photo, in EXIF order:
+
+    pixi run match -- datasets/phone_<ts> \
+        --clock-shows 14:03:21.132 --clock-shows 14:41:07.850
+
+The offset (displayed Mac time minus the clock photo's own EXIF time) is
+applied to every photo timestamp. Two clock photos also expose clock drift.
+Alternatively pass --clock-offset SECONDS directly; with neither, 0 is used
+(fine for stop-and-shoot if both devices are NTP-synced, but measure it).
+
+Stillness: the ~3 s hold per shot is what makes matching exact. For each
+photo the largest window (out of ±1.5/±1.0/±0.6/±0.3 s) whose pose spread is
+below --pos-thresh-mm / --rot-thresh-deg wins; its median pose is the answer.
+
+Until the Stage 2 hand-eye calibration exists, poses are of the `phone`
+marker body, not the lens optical center.
+
+Self-test (no lab, no files):  python scripts/match_photos.py --self-test
+"""
+
+import argparse
+import csv
+import math
+import mmap
+import os
+import struct
+import sys
+from bisect import bisect_left, bisect_right
+from datetime import datetime, timedelta, timezone
+from glob import glob
+
+import numpy as np
+
+# ─── EXIF capture time from a DNG (stdlib TIFF walk, no exif library) ───────
+
+_TYPESIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8}
+
+
+def _ifd_entries(mm, bo, off):
+    """Yield (tag, type, count, value_offset) for each entry of the IFD at off."""
+    (n,) = struct.unpack_from(bo + 'H', mm, off)
+    for i in range(n):
+        tag, typ, cnt = struct.unpack_from(bo + 'HHI', mm, off + 2 + i * 12)
+        voff = off + 2 + i * 12 + 8
+        if _TYPESIZE.get(typ, 1) * cnt > 4:
+            (voff,) = struct.unpack_from(bo + 'I', mm, voff)
+        yield tag, typ, cnt, voff
+
+
+def _ascii(mm, voff, cnt):
+    return bytes(mm[voff:voff + cnt]).split(b'\0')[0].decode('ascii', 'replace')
+
+
+def read_dng_exif(path):
+    """Return {'epoch_s', 'iso', 'exposure_s'} from a DNG's EXIF block.
+
+    epoch_s combines DateTimeOriginal + SubSecTimeOriginal +
+    OffsetTimeOriginal into a float unix timestamp (the *iPhone's* clock).
+    """
+    with open(path, 'rb') as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    try:
+        bo = '<' if mm[:2] == b'II' else '>'
+        (ifd0,) = struct.unpack_from(bo + 'I', mm, 4)
+        exif_off = None
+        for tag, typ, cnt, voff in _ifd_entries(mm, bo, ifd0):
+            if tag == 34665:                     # ExifIFD pointer (inline LONG)
+                exif_off = struct.unpack_from(bo + 'I', mm, voff)[0]
+        if exif_off is None:
+            raise ValueError(f'{path}: no EXIF IFD')
+
+        dto = subsec = offset = None
+        iso = exposure = None
+        for tag, typ, cnt, voff in _ifd_entries(mm, bo, exif_off):
+            if tag == 36867:                     # DateTimeOriginal
+                dto = _ascii(mm, voff, cnt)
+            elif tag == 37521:                   # SubSecTimeOriginal
+                subsec = _ascii(mm, voff, cnt)
+            elif tag == 36881:                   # OffsetTimeOriginal
+                offset = _ascii(mm, voff, cnt)
+            elif tag == 34855:                   # ISO
+                iso = struct.unpack_from(bo + 'H', mm, voff)[0]
+            elif tag == 33434:                   # ExposureTime (rational)
+                num, den = struct.unpack_from(bo + 'II', mm, voff)
+                exposure = num / den if den else 0.0
+        if dto is None:
+            raise ValueError(f'{path}: no DateTimeOriginal')
+
+        dt = datetime.strptime(dto, '%Y:%m:%d %H:%M:%S')
+        dt = dt.replace(tzinfo=_parse_tz(offset))
+        frac = float('0' + '.' + subsec) if subsec and subsec.isdigit() else 0.0
+        return {'epoch_s': dt.timestamp() + frac, 'iso': iso,
+                'exposure_s': exposure, 'tz': dt.tzinfo}
+    finally:
+        mm.close()
+
+
+def _parse_tz(offset_str):
+    """EXIF '+02:00' → tzinfo. Missing/malformed → local timezone (warn)."""
+    if offset_str and len(offset_str) >= 6 and offset_str[0] in '+-':
+        sign = 1 if offset_str[0] == '+' else -1
+        h, m = int(offset_str[1:3]), int(offset_str[4:6])
+        return timezone(sign * timedelta(hours=h, minutes=m))
+    print('WARNING: photo has no EXIF timezone; assuming Mac local time',
+          file=sys.stderr)
+    return datetime.now().astimezone().tzinfo
+
+
+def clock_offset_from(shown_str, clock_exif_epoch, tz):
+    """Offset (s) to ADD to iPhone EXIF times to get Mac time.
+
+    shown_str is the 'HH:MM:SS.mmm' visible in the clock photo (Mac local
+    time); its date is taken from the clock photo itself, disambiguated to
+    the nearest day.
+    """
+    hms, _, frac = shown_str.partition('.')
+    h, m, s = (int(x) for x in hms.split(':'))
+    photo_dt = datetime.fromtimestamp(clock_exif_epoch, tz)
+    shown_dt = photo_dt.replace(hour=h, minute=m, second=s, microsecond=0)
+    shown_epoch = shown_dt.timestamp() + (float('0.' + frac) if frac else 0.0)
+    off = shown_epoch - clock_exif_epoch
+    # nearest-day disambiguation (clock photo near midnight)
+    if off > 43200:
+        off -= 86400
+    elif off < -43200:
+        off += 86400
+    return off
+
+
+# ─── Pose track + stillness matching ─────────────────────────────────────────
+
+class PoseTrack:
+    """Time-sorted PoseStamped samples of one rigid body."""
+
+    def __init__(self, times_ns, pos, quat):
+        order = np.argsort(times_ns)
+        self.times = np.asarray(times_ns, dtype=np.int64)[order]
+        self.pos = np.asarray(pos, dtype=float)[order]
+        self.quat = np.asarray(quat, dtype=float)[order]   # xyzw
+
+
+def _quat_mean(Q):
+    """Sign-aligned normalized mean of xyzw quaternions (fine for a still window)."""
+    q0 = Q[0]
+    aligned = np.where((Q @ q0)[:, None] < 0, -Q, Q)
+    m = aligned.mean(axis=0)
+    return m / np.linalg.norm(m)
+
+
+def _quat_angle(q, qm):
+    return 2.0 * math.acos(min(1.0, abs(float(np.dot(q, qm)))))
+
+
+_WINDOWS_S = (1.5, 1.0, 0.6, 0.3)
+
+
+def match_still_pose(track, t_ns, pos_thresh_m, rot_thresh_rad, min_samples=20):
+    """Median pose over the largest still window around t_ns.
+
+    Returns (result_dict, None) or (None, reason_str).
+    """
+    best = None   # (pos_spread, rot_spread, span_ms) of the best failing try
+    for w in _WINDOWS_S:
+        half = int(w * 1e9)
+        i0 = bisect_left(track.times, t_ns - half)
+        i1 = bisect_right(track.times, t_ns + half)
+        if i1 - i0 < min_samples:
+            continue
+        P, Q = track.pos[i0:i1], track.quat[i0:i1]
+        med = np.median(P, axis=0)
+        pos_spread = float(np.max(np.linalg.norm(P - med, axis=1)))
+        qm = _quat_mean(Q)
+        rot_spread = max(_quat_angle(q, qm) for q in Q)
+        span_ms = (track.times[i1 - 1] - track.times[i0]) / 1e6
+        if pos_spread <= pos_thresh_m and rot_spread <= rot_thresh_rad:
+            return {'pos': med, 'quat': qm, 'still_ms': span_ms,
+                    'pos_spread_mm': pos_spread * 1e3,
+                    'rot_spread_deg': math.degrees(rot_spread)}, None
+        if best is None or pos_spread < best[0]:
+            best = (pos_spread, rot_spread, span_ms)
+    if best is None:
+        return None, 'no pose data around timestamp (check clock offset / bag)'
+    return None, (f'moving: best window spread {best[0]*1e3:.1f} mm / '
+                  f'{math.degrees(best[1]):.2f} deg over {best[2]:.0f} ms')
+
+
+# ─── Bag loading (lazy ROS imports — self-test runs without the overlay) ────
+
+def load_pose_track(bag_dir, rigid_body):
+    import rosbag2_py
+    from rclpy.serialization import deserialize_message
+    from geometry_msgs.msg import PoseStamped
+
+    reader = rosbag2_py.SequentialReader()
+    reader.open(rosbag2_py.StorageOptions(uri=bag_dir, storage_id='sqlite3'),
+                rosbag2_py.ConverterOptions('', ''))
+    topics = [t.name for t in reader.get_all_topics_and_types()
+              if t.name.startswith('/optitrack/')]
+    want = f'/optitrack/{rigid_body}'
+    if want not in topics:
+        if len(topics) == 1:
+            want = topics[0]
+            print(f'NOTE: rigid body {rigid_body!r} not in bag; '
+                  f'using the only body present: {want}', file=sys.stderr)
+        else:
+            raise SystemExit(f'rigid body topic {want} not in bag; '
+                             f'available: {topics} (use --rigid-body)')
+
+    times, pos, quat = [], [], []
+    while reader.has_next():
+        topic, raw, _ = reader.read_next()
+        if topic != want:
+            continue
+        m = deserialize_message(raw, PoseStamped)
+        times.append(m.header.stamp.sec * 1_000_000_000 + m.header.stamp.nanosec)
+        p, o = m.pose.position, m.pose.orientation
+        pos.append((p.x, p.y, p.z))
+        quat.append((o.x, o.y, o.z, o.w))
+    if not times:
+        raise SystemExit(f'no messages on {want} in {bag_dir}')
+    print(f'{want}: {len(times)} poses, '
+          f'{(max(times) - min(times)) / 1e9:.1f} s span')
+    return PoseTrack(times, pos, quat)
+
+
+# ─── Session processing ──────────────────────────────────────────────────────
+
+def process_session(args):
+    session = args.session.rstrip('/')
+    photo_files = sorted(glob(os.path.join(session, 'photos', '*.dng')) +
+                         glob(os.path.join(session, 'photos', '*.DNG')))
+    if not photo_files:
+        raise SystemExit(f'no DNGs in {session}/photos/')
+
+    # clock offset
+    if args.clock_offset is not None:
+        offset = args.clock_offset
+        print(f'clock offset (given): {offset:+.3f} s')
+    elif args.clock_shows:
+        clock_files = sorted(
+            glob(os.path.join(session, 'clock', '*.dng')) +
+            glob(os.path.join(session, 'clock', '*.DNG')),
+            key=lambda p: read_dng_exif(p)['epoch_s'])
+        if len(clock_files) < len(args.clock_shows):
+            raise SystemExit(f'{len(args.clock_shows)} --clock-shows values but '
+                             f'only {len(clock_files)} DNGs in {session}/clock/')
+        offsets = []
+        for shown, cf in zip(args.clock_shows, clock_files):
+            ex = read_dng_exif(cf)
+            offsets.append(clock_offset_from(shown, ex['epoch_s'], ex['tz']))
+        offset = float(np.mean(offsets))
+        print('clock offset: ' + ', '.join(f'{o:+.3f} s' for o in offsets)
+              + f' → using {offset:+.3f} s')
+        if len(offsets) > 1 and max(offsets) - min(offsets) > 0.05:
+            print(f'WARNING: clock offset drifted '
+                  f'{(max(offsets) - min(offsets)) * 1e3:.0f} ms during the '
+                  f'session — timestamps may be degraded', file=sys.stderr)
+    else:
+        offset = 0.0
+        print('WARNING: no --clock-shows/--clock-offset — assuming iPhone and '
+              'Mac clocks agree (NTP). Measure it next session.',
+              file=sys.stderr)
+
+    track = load_pose_track(session, args.rigid_body)
+
+    matched, rejected = [], []
+    for pf in photo_files:
+        rel = os.path.relpath(pf, session)
+        try:
+            ex = read_dng_exif(pf)
+        except (ValueError, struct.error) as e:
+            rejected.append((rel, f'EXIF parse failed: {e}'))
+            continue
+        t_ns = int(round((ex['epoch_s'] + offset) * 1e9))
+        res, reason = match_still_pose(
+            track, t_ns,
+            pos_thresh_m=args.pos_thresh_mm * 1e-3,
+            rot_thresh_rad=math.radians(args.rot_thresh_deg))
+        if res is None:
+            rejected.append((rel, reason))
+            continue
+        p, q = res['pos'], res['quat']
+        matched.append([rel, t_ns,
+                        *(round(float(v), 6) for v in p),
+                        *(round(float(v), 6) for v in q),
+                        round(res['still_ms'], 1),
+                        round(res['pos_spread_mm'], 2),
+                        round(res['rot_spread_deg'], 3),
+                        ex['iso'], ex['exposure_s']])
+
+    frames_csv = os.path.join(session, 'frames.csv')
+    with open(frames_csv, 'w', newline='') as f:
+        wr = csv.writer(f)
+        wr.writerow(['image_file', 't_capture_ns', 'x', 'y', 'z',
+                     'qx', 'qy', 'qz', 'qw', 'still_ms', 'pos_spread_mm',
+                     'rot_spread_deg', 'iso', 'exposure_s'])
+        wr.writerows(sorted(matched, key=lambda r: r[1]))
+
+    rej_csv = os.path.join(session, 'rejected.csv')
+    with open(rej_csv, 'w', newline='') as f:
+        wr = csv.writer(f)
+        wr.writerow(['image_file', 'reason'])
+        wr.writerows(rejected)
+
+    print(f'\nmatched {len(matched)}/{len(photo_files)} photos → {frames_csv}')
+    for rel, reason in rejected:
+        print(f'  REJECTED {rel}: {reason}', file=sys.stderr)
+    if rejected:
+        print(f'({len(rejected)} rejected → {rej_csv})', file=sys.stderr)
+
+
+# ─── Self-test (synthetic track + fabricated timestamps, no ROS, no files) ──
+
+def self_test():
+    rng = np.random.default_rng(0)
+    hz, t0 = 120, 1_700_000_000_000_000_000        # some epoch, ns
+    times, pos, quat = [], [], []
+
+    def q_z(deg):
+        a = math.radians(deg) / 2
+        return np.array([0.0, 0.0, math.sin(a), math.cos(a)])
+
+    A, B = np.array([1.0, 2.0, 3.0]), np.array([2.0, 2.0, 3.0])
+    qA, qB = q_z(0), q_z(30)
+    for i in range(10 * hz):                        # 10 s @ 120 Hz
+        t = i / hz
+        if t < 3.0:      p, q = A, qA               # still at A
+        elif t < 4.0:                                # moving A → B
+            u = t - 3.0
+            p, q = A + u * (B - A), q_z(30 * u)
+        elif t < 7.0:    p, q = B, qB               # still at B
+        else:                                        # moving again
+            p, q = B + (t - 7.0) * np.array([0.3, 0, 0]), qB
+        times.append(t0 + int(t * 1e9))
+        pos.append(p + rng.normal(0, 0.0002, 3))    # 0.2 mm mocap noise
+        quat.append(q / np.linalg.norm(q))
+    track = PoseTrack(times, pos, quat)
+
+    def t_at(sec):
+        return t0 + int(sec * 1e9)
+
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(f'  {"PASS" if cond else "FAIL"}  {name}')
+        ok &= cond
+
+    kw = dict(pos_thresh_m=0.002, rot_thresh_rad=math.radians(0.3))
+    resA, _ = match_still_pose(track, t_at(1.5), **kw)
+    check('still shot at A matches', resA is not None)
+    check('pose A correct (<1 mm)',
+          resA is not None and np.linalg.norm(resA['pos'] - A) < 0.001)
+
+    resB, _ = match_still_pose(track, t_at(5.5), **kw)
+    check('still shot at B matches', resB is not None)
+    check('pose B correct (<1 mm, ~30 deg)',
+          resB is not None and np.linalg.norm(resB['pos'] - B) < 0.001
+          and abs(_quat_angle(resB['quat'], q_z(30))) < math.radians(0.1))
+
+    resM, reasonM = match_still_pose(track, t_at(3.5), **kw)
+    check('moving shot rejected', resM is None and reasonM.startswith('moving'))
+
+    resN, reasonN = match_still_pose(track, t_at(60.0), **kw)
+    check('shot outside pose data rejected',
+          resN is None and reasonN.startswith('no pose data'))
+
+    # clock-offset math: photo EXIF says 10:00:00.000, screen showed 10:00:00.500
+    tz = timezone(timedelta(hours=2))
+    exif_epoch = datetime(2026, 7, 7, 10, 0, 0, tzinfo=tz).timestamp()
+    off = clock_offset_from('10:00:00.500', exif_epoch, tz)
+    check('clock offset = +0.500 s', abs(off - 0.5) < 1e-6)
+    off = clock_offset_from('23:59:59.900',
+                            datetime(2026, 7, 7, 0, 0, 0, tzinfo=tz).timestamp(), tz)
+    check('midnight wrap disambiguated', abs(off - (-0.1)) < 1e-6)
+
+    print('self-test ' + ('PASSED' if ok else 'FAILED'))
+    return 0 if ok else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('session', nargs='?',
+                    help='session folder (datasets/phone_<ts>)')
+    ap.add_argument('--rigid-body', default='phone',
+                    help="Motive rigid body of the iPhone (default: phone)")
+    ap.add_argument('--clock-shows', action='append', default=[],
+                    metavar='HH:MM:SS.mmm',
+                    help='time visible in a clock photo; repeat per clock photo '
+                         '(EXIF order: session start first)')
+    ap.add_argument('--clock-offset', type=float, default=None, metavar='SEC',
+                    help='iPhone→Mac clock offset in seconds (overrides '
+                         '--clock-shows)')
+    ap.add_argument('--pos-thresh-mm', type=float, default=2.0,
+                    help='max position spread to count as still (default 2.0)')
+    ap.add_argument('--rot-thresh-deg', type=float, default=0.3,
+                    help='max rotation spread to count as still (default 0.3)')
+    ap.add_argument('--self-test', action='store_true',
+                    help='run the synthetic matcher test (no session needed)')
+    args = ap.parse_args()
+
+    if args.self_test:
+        sys.exit(self_test())
+    if not args.session:
+        ap.error('session folder required (or --self-test)')
+    process_session(args)
+
+
+if __name__ == '__main__':
+    main()

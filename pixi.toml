@@ -11,10 +11,8 @@ version = "0.1.0"
 #   editable from src/). The ament_python / ament_cmake packages under src/ are
 #   colcon-built (see the `build` task), not pip-installed.
 #
-#   NB: Python is pinned to 3.11 — the Orbbec camera SDK (pyorbbecsdk) ships no
-#   wheel past cp311. This is why the workspace stays on the colcon build model
-#   rather than master's pixi-build model, which would force the ROS distro to
-#   Python 3.12 (via ros2-distro-mutex) and make pyorbbecsdk unsatisfiable.
+#   NB: Python is pinned to 3.11 — the version this workspace's colcon build
+#   model and RoboStack Humble toolchain were built and tested against.
 # ──────────────────────────────────────────────────────────────────────────
 [feature.optitrack]
 channels = ["conda-forge", "robostack-humble"]
@@ -41,7 +39,7 @@ make = "*"
 ninja = "*"
 git = "*"
 pip = "*"
-# PNG writing in scripts/export_dataset.py (16-bit depth + RGB).
+# Image handling in scripts/ (photo pipeline).
 pillow = ">=10"
 
 [feature.optitrack.pypi-dependencies]
@@ -50,18 +48,12 @@ pillow = ">=10"
 natnet_py = { path = "src/natnet_py", editable = true }
 # Runtime dep of natnet_py — also pulled in transitively, listed here for clarity.
 netifaces = ">=0.11"
-# NB: optitrack_ros_py, optitrack_listener, orbbec_camera_ros and the real
-# optitrack_msgs package are NOT listed here. They're ament ROS 2 packages;
-# pip's editable install would skip their data_files / message generation, so
-# the ament_index would have no record of them and `ros2 launch` couldn't find
-# them. Instead they're colcon-built via the implicit `build` task that
-# `launch`/`camera`/`record` depend on — data_files land in the right place.
-
-# Orbbec Femto Mega SDK — universal2 wheel, published for macOS arm64 only
-# (cp36–cp311, no cp312). Scoped to osx-arm64 so the linux-aarch64 environment
-# stays resolvable; the camera pipeline is macOS-only anyway.
-[feature.optitrack.target.osx-arm64.pypi-dependencies]
-pyorbbecsdk = ">=1.3.2"
+# NB: optitrack_ros_py, optitrack_listener and the real optitrack_msgs package
+# are NOT listed here. They're ament ROS 2 packages; pip's editable install
+# would skip their data_files / message generation, so the ament_index would
+# have no record of them and `ros2 launch` couldn't find them. Instead they're
+# colcon-built via the implicit `build` task that `launch`/`record-poses`
+# depend on — data_files land in the right place.
 
 [environments]
 default = { features = ["optitrack"] }
@@ -83,16 +75,14 @@ ROS_LOCALHOST_ONLY = "1"
 # Tasks
 #   pixi run patch-natnet       — idempotent one-line fix to natnet_py
 #   pixi run build              — colcon build the ROS 2 workspace
-#   pixi run launch             — start driver + listener (no camera, no bag)
-#   pixi run camera             — start ONLY the Orbbec camera node
-#                                 NOTE: requires root, like `record`
-#   pixi run record             — start driver + camera + rosbag recording
-#                                 NOTE: requires root (macOS UVC driver conflict)
-#                                 First time: sudo pixi run record
-#                                 After setup-usb-perms: pixi run record
-#   pixi run record-mock        — same pipeline with synthetic data (no hardware)
-#   pixi run export -- <bag>    — bag → PNGs + per-frame pose CSV
-#   pixi run setup-usb-perms    — one-time grant of passwordless sudo for record
+#   pixi run launch             — start driver + listener (no bag)
+#   pixi run record-poses       — driver + rosbag of all /optitrack/* poses,
+#                                 for an iPhone photo session (no sudo)
+#   pixi run record-mock        — same pipeline with a synthetic pose publisher
+#                                 (no hardware, no OptiTrack server)
+#   pixi run ms-clock           — millisecond clock display for the session
+#                                 clock photo
+#   pixi run match -- <session> — match photos/*.dng to poses → frames.csv
 #   pixi run rviz-optitrack     — launch RViz with saved config
 # ──────────────────────────────────────────────────────────────────────────
 [tasks.patch-natnet]
@@ -114,33 +104,23 @@ description = "Run the OptiTrack driver + example listener (builds automatically
 cmd = "bash -c 'source install/setup.bash && ros2 launch optitrack_listener optitrack.launch.py'"
 depends-on = ["build"]
 
-[tasks.camera]
-description = "Run only the Orbbec Femto Mega camera node (no OptiTrack, no bag). Needs root (see setup-usb-perms)."
-# Same chown trick as `record`: hand root-owned build artifacts back to the
-# real user so the next non-sudo build doesn't fail with EPERM.
-cmd = "bash -c 'source install/setup.bash && ros2 launch optitrack_listener camera.launch.py; [ -n \"${SUDO_USER:-}\" ] && chown -R \"$SUDO_USER\" build install log || true'"
-depends-on = ["build"]
-
-[tasks.record]
-description = "Record OptiTrack poses + Orbbec camera to a rosbag. Needs root (see setup-usb-perms)."
-# The trailing chown hands everything the root process touched (bag, colcon
-# build artifacts, logs) back to the real user — otherwise the next non-sudo
-# build fails with EPERM on root-owned files.
-cmd = "bash -c 'source install/setup.bash && ros2 launch optitrack_listener record.launch.py; [ -n \"${SUDO_USER:-}\" ] && chown -R \"$SUDO_USER\" build install log datasets || true'"
+[tasks.record-poses]
+description = "Record all OptiTrack rigid-body poses to a rosbag for an iPhone photo session (no sudo)."
+cmd = "bash -c 'source install/setup.bash && ros2 launch optitrack_listener record.launch.py'"
 depends-on = ["build"]
 
 [tasks.record-mock]
-description = "Test the recording pipeline with synthetic camera + pose data (no hardware, no sudo)."
+description = "Test the pose-recording pipeline with a synthetic pose publisher (no hardware, no sudo)."
 cmd = "bash -c 'source install/setup.bash && MOCK_RECORD=1 ros2 launch optitrack_listener record.launch.py'"
 depends-on = ["build"]
 
-[tasks.export]
-description = "Export a recorded bag to PNGs + per-frame pose CSV. Usage: pixi run export -- datasets/<bag> [--rigid-body NAME] [--time-offset SEC]"
-cmd = "python scripts/export_dataset.py"
+[tasks.ms-clock]
+description = "Show a millisecond clock to photograph at session start/end (clock photo)."
+cmd = "python scripts/ms_clock.py"
 
-[tasks.setup-usb-perms]
-description = "One-time: grant passwordless sudo so 'pixi run record' works without a password prompt."
-cmd = "sudo bash scripts/setup_usb_permissions.sh"
+[tasks.match]
+description = "Match a session's photos to poses. Usage: pixi run match -- datasets/phone_<ts> --clock-shows HH:MM:SS.mmm [--rigid-body phone]"
+cmd = "python scripts/match_photos.py"
 
 [tasks.rviz-optitrack]
 description = "Launch RViz with the saved Optitrack config."

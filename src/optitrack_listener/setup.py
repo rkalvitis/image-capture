@@ -12,7 +12,6 @@ setup(
         ('share/' + package_name + '/launch', [
             'launch/optitrack.launch.py',
             'launch/record.launch.py',
-            'launch/camera.launch.py',
         ]),
     ],
     install_requires=['setuptools'],

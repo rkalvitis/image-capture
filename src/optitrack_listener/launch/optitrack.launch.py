@@ -4,8 +4,8 @@ our example listener in one shot.
 Native macOS variant: reads OPTITRACK_PC_IP / MY_IP / OPTITRACK_FRAME_ID
 from the environment (set by run.sh), with lab-default fallbacks.
 
-For dataset recording (OptiTrack + Orbbec camera + rosbag) use instead:
-  sudo pixi run record   →   record.launch.py
+For a photo-session pose recording (OptiTrack + rosbag) use instead:
+  pixi run record-poses   →   record.launch.py
 """
 
 import os
