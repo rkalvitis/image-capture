@@ -13,3 +13,5 @@ __pycache__/
 
 # rosbag datasets (large binary files)
 datasets/
+.CLAUDE
+docs/

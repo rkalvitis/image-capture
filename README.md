@@ -66,7 +66,7 @@ The driver reads three env vars (lab defaults shown):
 | Env var              | Default           |
 |----------------------|-------------------|
 | `OPTITRACK_PC_IP`    | `192.168.201.5`   |
-| `MY_IP`              | `192.168.201.89`  |
+| `MY_IP`              | auto-detected (falls back to `192.168.201.245`) |
 | `OPTITRACK_FRAME_ID` | `world`           |
 
 ### Find the OptiTrack PC IP (on the Windows Motive machine)

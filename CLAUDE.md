@@ -66,7 +66,10 @@ Two passes over the bag: pass 1 builds a time-sorted `PoseTrack` and depth index
 
 ## Lab environment defaults
 Driver reads three env vars (lab defaults): `OPTITRACK_PC_IP=192.168.201.5`,
-`MY_IP=192.168.201.89`, `OPTITRACK_FRAME_ID=world`. Override per run, e.g.
+`MY_IP` (auto-detected from the route to the Motive PC; fallback
+`192.168.201.245` = the lab Mac), `OPTITRACK_FRAME_ID=world`. `MY_IP` must NOT
+be set in `pixi.toml` activation env — that would override both auto-detection
+and per-run shell overrides. Override per run, e.g.
 `OPTITRACK_PC_IP=192.168.201.6 pixi run launch`. Motive must have the OptiTrack
 Streaming Engine ON, Unicast, rigid bodies ON, command port 1510 / data port 1511.
 

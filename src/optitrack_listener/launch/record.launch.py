@@ -47,6 +47,9 @@ _COLOR_FPS = int(os.environ.get('CAMERA_COLOR_FPS', '15'))
 _DEPTH_W = int(os.environ.get('CAMERA_DEPTH_WIDTH', '1024'))
 _DEPTH_H = int(os.environ.get('CAMERA_DEPTH_HEIGHT', '1024'))
 _DEPTH_FPS = int(os.environ.get('CAMERA_DEPTH_FPS', '15'))
+# IR (ToF infrared) adds a full 1024²×16-bit copy per frameset; disable it
+# (CAMERA_ENABLE_IR=0) to lighten the consumer and lift the effective fps.
+_ENABLE_IR = os.environ.get('CAMERA_ENABLE_IR', '1') not in ('', '0', 'false')
 
 # Connection: 'usb' (default) or 'net' for Gigabit Ethernet / PoE. Net avoids
 # the USB 2.0 bandwidth ceiling and needs no root. Set the camera's LAN IP:
@@ -86,7 +89,7 @@ def _default_client_ip(server: str) -> str:
         s.connect((server, 1510))
         return s.getsockname()[0]
     except OSError:
-        return '192.168.201.89'
+        return '192.168.201.245'
     finally:
         s.close()
 
@@ -155,6 +158,7 @@ def generate_launch_description():
                 'depth_width': _DEPTH_W,
                 'depth_height': _DEPTH_H,
                 'depth_fps': _DEPTH_FPS,
+                'enable_ir': _ENABLE_IR,
             }],
         ),
 

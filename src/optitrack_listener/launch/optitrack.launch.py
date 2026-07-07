@@ -27,7 +27,7 @@ def _default_client_ip(server: str) -> str:
         s.connect((server, 1510))
         return s.getsockname()[0]
     except OSError:
-        return '192.168.201.89'
+        return '192.168.201.245'
     finally:
         s.close()
 

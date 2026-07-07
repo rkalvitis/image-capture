@@ -45,6 +45,8 @@ Parameters:
 """
 
 import io
+import time
+from array import array
 
 import rclpy
 from rclpy.node import Node
@@ -107,12 +109,17 @@ class OrbbecCameraNode(Node):
         # the 6-DoF accel+gyro (tiny bandwidth, high rate).
         self.declare_parameter('enable_ir', True)
         self.declare_parameter('enable_imu', True)
+        # Hardware frame sync pairs color+depth into one frameset. It only emits
+        # when the two align, which roughly halves the delivered rate — and the
+        # export pipeline re-pairs by timestamp anyway, so it's off by default.
+        self.declare_parameter('frame_sync', False)
 
         self._connection = self.get_parameter('connection').value
         self._net_ip = self.get_parameter('net_ip').value
         self._net_port = self.get_parameter('net_port').value
         self._enable_ir = self.get_parameter('enable_ir').value
         self._enable_imu = self.get_parameter('enable_imu').value
+        self._frame_sync = self.get_parameter('frame_sync').value
         self._cw = self.get_parameter('color_width').value
         self._ch = self.get_parameter('color_height').value
         self._cf = self.get_parameter('color_fps').value
@@ -121,6 +128,12 @@ class OrbbecCameraNode(Node):
         self._df = self.get_parameter('depth_fps').value
         self._timeout = self.get_parameter('frame_timeout').value
         self._mock = self.get_parameter('mock').value
+
+        # Shutdown coordination: _shutting_down makes the SDK frame callback a
+        # no-op so pipeline.stop() can't deadlock against a mid-flight callback;
+        # _stopped makes stop_camera() idempotent.
+        self._shutting_down = False
+        self._stopped = False
 
         self._color_pub = self.create_publisher(
             CompressedImage, '/camera/color/image_raw/compressed', 10)
@@ -206,16 +219,17 @@ class OrbbecCameraNode(Node):
                 self.get_logger().warn(f'IMU streams unavailable, skipping: {e}')
                 self._enable_imu = False
 
-        # Hardware frame sync pairs color+depth by capture time, but the SDK
-        # requires EQUAL color/depth fps for it. When they differ (e.g. 4K color
-        # @25 with WFOV depth capped @15) we stream them independently — export
-        # pairs each color frame to the nearest depth by timestamp regardless.
-        if color_prof.get_fps() == depth_prof.get_fps():
+        # Hardware frame sync pairs color+depth into one frameset by capture
+        # time, but it only emits aligned pairs — which roughly halves the
+        # delivered rate — and needs EQUAL color/depth fps. Off by default:
+        # export re-pairs each color frame to the nearest depth by timestamp, so
+        # we stream them independently at full rate.
+        if self._frame_sync and color_prof.get_fps() == depth_prof.get_fps():
             try:
                 self._pipeline.enable_frame_sync()
             except Exception as e:
                 self.get_logger().warn(f'enable_frame_sync failed: {e}')
-        else:
+        elif self._frame_sync:
             self.get_logger().warn(
                 f'color {color_prof.get_fps()}fps != depth {depth_prof.get_fps()}fps'
                 ' — frame sync off; color/depth paired by timestamp at export')
@@ -319,10 +333,22 @@ class OrbbecCameraNode(Node):
     # ── real camera ─────────────────────────────────────────────────────────
 
     def _on_frames(self, frameset):
-        """SDK push callback — the continuous frame stream (see __init__)."""
-        if frameset is None or self._color_info is None:
-            return  # not yet ready (camera_info set just after start())
-        self._publish_frameset(frameset)
+        """SDK push callback — the continuous frame stream (see __init__).
+
+        Runs on an SDK-owned thread. An exception must never escape here: it
+        would propagate into the C++ caller and abort the process (SIGABRT).
+        In particular, on SIGINT rclpy invalidates the publisher context while
+        frames may still be arriving, so publish() raises RCLError — catch it.
+        """
+        if (self._shutting_down or not rclpy.ok()
+                or frameset is None or self._color_info is None):
+            return  # tearing down, or not yet ready (camera_info set after start())
+        try:
+            self._publish_frameset(frameset)
+        except Exception as e:  # noqa: BLE001 — must not let it reach C++
+            if rclpy.ok():
+                self.get_logger().warn(f'frame publish failed: {e}')
+            # else: context torn down mid-callback during shutdown — expected
 
     def _publish_frameset(self, frameset):
         color_frame = frameset.get_color_frame()
@@ -372,7 +398,7 @@ class OrbbecCameraNode(Node):
         img.width, img.height = w, h
         img.encoding = 'mono16'
         img.step = w * 2
-        img.data = data.tobytes()
+        img.data = array('B', data.tobytes())  # fast path, see _publish_color_jpeg
         self._ir_pub.publish(img)
         self._ir_info.header.stamp = stamp
         self._irinfo_pub.publish(self._ir_info)
@@ -398,7 +424,10 @@ class OrbbecCameraNode(Node):
         msg.header.stamp = stamp
         msg.header.frame_id = 'camera_color_optical_frame'
         msg.format = 'jpeg'
-        msg.data = jpeg
+        # array('B') hits the generated setter's fast path; assigning bytes
+        # triggers a per-byte pure-Python validation loop (~60 ms on a 2 MiB
+        # frame) that pegged a core and made the SDK drop framesets.
+        msg.data = array('B', jpeg)
         self._color_pub.publish(msg)
         self._color_info.header.stamp = stamp
         self._cinfo_pub.publish(self._color_info)
@@ -410,7 +439,7 @@ class OrbbecCameraNode(Node):
         img.width, img.height = w, h
         img.encoding = '16UC1'
         img.step = w * 2
-        img.data = data.tobytes()
+        img.data = array('B', data.tobytes())  # fast path, see _publish_color_jpeg
         self._depth_pub.publish(img)
         self._depth_info.header.stamp = stamp
         self._dinfo_pub.publish(self._depth_info)
@@ -454,21 +483,59 @@ class OrbbecCameraNode(Node):
         depth = (1000 + 2 * np.hypot(xx - self._dw / 2, yy - self._dh / 2)).astype(np.uint16)
         self._publish_depth(depth.reshape(-1), self._dw, self._dh, stamp)
 
-    def destroy_node(self):
-        if not self._mock:
+    def stop_camera(self):
+        """Cleanly stop the SDK pipeline exactly once.
+
+        Ordering matters: flip _shutting_down and let any in-flight _on_frames
+        callback return before calling pipeline.stop(), otherwise stop() can
+        deadlock against the callback thread's lock (the 'recursive_mutex'
+        abort). Letting stop() run to completion is what tells the camera
+        firmware to halt its video streams and releases the USB device —
+        skipping it (e.g. a hard os._exit) leaves the streams wedged, so the
+        next run enumerates the device but receives no color/depth frames.
+        """
+        if self._mock or self._stopped:
+            return
+        self._stopped = True
+        self._shutting_down = True
+        time.sleep(0.15)  # let a mid-flight frame callback drain
+        try:
             self._pipeline.stop()
+        except Exception as e:
+            self.get_logger().warn(f'pipeline.stop() failed: {e}')
+
+    def destroy_node(self):
+        self.stop_camera()
         super().destroy_node()
 
 
 def main():
+    import os
     rclpy.init()
+    node = None
     try:
         node = OrbbecCameraNode()
         rclpy.spin(node)
     except (KeyboardInterrupt, RuntimeError):
         pass
     finally:
-        rclpy.shutdown()
+        # Order is the whole game here:
+        #   1. stop_camera() SYNCHRONOUSLY halts the video streams (sends the
+        #      SDK stop command). Completing this is what keeps the next run
+        #      from inheriting a device still streaming into a dead process.
+        #   2. os._exit() only AFTER that completes. The SDK leaves non-daemon
+        #      threads that otherwise stall interpreter exit ~5 s and then abort
+        #      in a static destructor (recursive_mutex). The streams are already
+        #      stopped, so a hard exit is safe — the OS reclaims the USB handle.
+        # The original teardown ran stop() in an abandonable 3 s daemon thread
+        # and let the publish-race abort kill the process first, so the stop
+        # never finished — that is what wedged the camera.
+        if node is not None:
+            node.stop_camera()
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+        os._exit(0)
 
 
 if __name__ == '__main__':
