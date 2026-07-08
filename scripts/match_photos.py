@@ -167,6 +167,48 @@ def _quat_angle(q, qm):
     return 2.0 * math.acos(min(1.0, abs(float(np.dot(q, qm)))))
 
 
+def _slerp(q0, q1, u):
+    """Spherical interpolation between two xyzw quaternions, u in [0, 1]."""
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:            # take the short arc
+        q1, dot = -q1, -dot
+    if dot > 0.9995:         # nearly parallel — lerp is fine and stable
+        q = q0 + u * (q1 - q0)
+        return q / np.linalg.norm(q)
+    theta = math.acos(max(-1.0, min(1.0, dot)))
+    s = math.sin(theta)
+    return (math.sin((1.0 - u) * theta) * q0 + math.sin(u * theta) * q1) / s
+
+
+def interp_pose(track, t_ns, max_gap_ns=100_000_000):
+    """Pose interpolated at t_ns — for photos taken while moving.
+
+    No stillness requirement: accuracy depends directly on the timestamp,
+    since pose error = camera speed × clock-offset error. Returns
+    (result_dict, None) or (None, reason_str).
+    """
+    i = bisect_left(track.times, t_ns)
+    if i == 0 or i == len(track.times):
+        return None, 'no pose data around timestamp (check clock offset / bag)'
+    t0, t1 = int(track.times[i - 1]), int(track.times[i])
+    if t1 - t0 > max_gap_ns:
+        return None, (f'tracking dropout around timestamp '
+                      f'({(t1 - t0) / 1e6:.0f} ms gap)')
+    u = (t_ns - t0) / (t1 - t0) if t1 > t0 else 0.0
+    pos = (1.0 - u) * track.pos[i - 1] + u * track.pos[i]
+    quat = _slerp(track.quat[i - 1], track.quat[i], u)
+    # quality metric: how much the camera moved within ±50 ms of the shot —
+    # roughly the pose uncertainty from a ±tens-of-ms timestamp error
+    j0 = bisect_left(track.times, t_ns - 50_000_000)
+    j1 = bisect_right(track.times, t_ns + 50_000_000)
+    P, Q = track.pos[j0:j1], track.quat[j0:j1]
+    med = np.median(P, axis=0)
+    return {'pos': pos, 'quat': quat, 'still_ms': 0.0,
+            'pos_spread_mm': float(np.max(np.linalg.norm(P - med, axis=1))) * 1e3,
+            'rot_spread_deg': math.degrees(
+                max(_quat_angle(q, _quat_mean(Q)) for q in Q))}, None
+
+
 _WINDOWS_S = (1.5, 1.0, 0.6, 0.3)
 
 
@@ -288,10 +330,13 @@ def process_session(args):
             rejected.append((rel, f'EXIF parse failed: {e}'))
             continue
         t_ns = int(round((ex['epoch_s'] + offset) * 1e9))
-        res, reason = match_still_pose(
-            track, t_ns,
-            pos_thresh_m=args.pos_thresh_mm * 1e-3,
-            rot_thresh_rad=math.radians(args.rot_thresh_deg))
+        if args.interp:
+            res, reason = interp_pose(track, t_ns)
+        else:
+            res, reason = match_still_pose(
+                track, t_ns,
+                pos_thresh_m=args.pos_thresh_mm * 1e-3,
+                rot_thresh_rad=math.radians(args.rot_thresh_deg))
         if res is None:
             rejected.append((rel, reason))
             continue
@@ -381,6 +426,15 @@ def self_test():
     check('shot outside pose data rejected',
           resN is None and reasonN.startswith('no pose data'))
 
+    resI, _ = interp_pose(track, t_at(3.5))
+    mid = (A + B) / 2
+    check('interp: moving shot pose = midpoint (~15 deg)',
+          resI is not None and np.linalg.norm(resI['pos'] - mid) < 0.001
+          and abs(_quat_angle(resI['quat'], q_z(15))) < math.radians(0.1))
+    resI2, reasonI2 = interp_pose(track, t_at(60.0))
+    check('interp: outside pose data rejected',
+          resI2 is None and reasonI2.startswith('no pose data'))
+
     # clock-offset math: photo EXIF says 10:00:00.000, screen showed 10:00:00.500
     tz = timezone(timedelta(hours=2))
     exif_epoch = datetime(2026, 7, 7, 10, 0, 0, tzinfo=tz).timestamp()
@@ -414,6 +468,11 @@ def main():
                     help='max rotation spread to count as still (default 0.5; '
                          'Motive orientation noise on small bodies measured '
                          '~0.3-0.4 deg peak, lab test 2026-07-08)')
+    ap.add_argument('--interp', action='store_true',
+                    help='no stillness requirement: interpolate the pose at '
+                         'each photo\'s EXIF timestamp (for photos taken '
+                         'while moving; accuracy = camera speed × clock '
+                         'error, so measure the clock offset carefully)')
     ap.add_argument('--self-test', action='store_true',
                     help='run the synthetic matcher test (no session needed)')
     args = ap.parse_args()
