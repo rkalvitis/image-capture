@@ -24,9 +24,17 @@ applied to every photo timestamp. Two clock photos also expose clock drift.
 Alternatively pass --clock-offset SECONDS directly; with neither, 0 is used
 (fine for stop-and-shoot if both devices are NTP-synced, but measure it).
 
-Stillness: the ~3 s hold per shot is what makes matching exact. For each
-photo the largest window (out of ±1.5/±1.0/±0.6/±0.3 s) whose pose spread is
-below --pos-thresh-mm / --rot-thresh-deg wins; its median pose is the answer.
+Matching (default): the pose is interpolated at each photo's corrected EXIF
+timestamp — no shooting protocol is enforced. Per-row quality columns let
+you filter afterwards: 'gap_ms' (spacing of the bracketing pose samples;
+large = bridged across a tracking dropout) and 'pos_spread_mm' /
+'rot_spread_deg' (camera motion within ±50 ms of the shot — the pose
+uncertainty a tens-of-ms timestamp error causes). Holding still around each
+shot still pays: it makes the pose immune to clock error.
+
+--require-still (opt-in strict mode): only accept photos with a still
+window around them (largest of ±1.5/±1.0/±0.6/±0.3 s whose pose spread is
+below --pos-thresh-mm / --rot-thresh-deg); its median pose is the answer.
 
 Until the Stage 2 hand-eye calibration exists, poses are of the `phone`
 marker body, not the lens optical center.
@@ -180,20 +188,19 @@ def _slerp(q0, q1, u):
     return (math.sin((1.0 - u) * theta) * q0 + math.sin(u * theta) * q1) / s
 
 
-def interp_pose(track, t_ns, max_gap_ns=100_000_000):
-    """Pose interpolated at t_ns — for photos taken while moving.
+def interp_pose(track, t_ns):
+    """Pose interpolated at t_ns (the default matching mode).
 
-    No stillness requirement: accuracy depends directly on the timestamp,
-    since pose error = camera speed × clock-offset error. Returns
+    No stillness or gap requirement — every photo inside the bag's time span
+    gets a pose. 'gap_ms' reports the spacing of the bracketing samples
+    (~10 ms normally; large values mean the pose was bridged across a
+    tracking dropout — filter on it downstream). Returns
     (result_dict, None) or (None, reason_str).
     """
     i = bisect_left(track.times, t_ns)
     if i == 0 or i == len(track.times):
         return None, 'no pose data around timestamp (check clock offset / bag)'
     t0, t1 = int(track.times[i - 1]), int(track.times[i])
-    if t1 - t0 > max_gap_ns:
-        return None, (f'tracking dropout around timestamp '
-                      f'({(t1 - t0) / 1e6:.0f} ms gap)')
     u = (t_ns - t0) / (t1 - t0) if t1 > t0 else 0.0
     pos = (1.0 - u) * track.pos[i - 1] + u * track.pos[i]
     quat = _slerp(track.quat[i - 1], track.quat[i], u)
@@ -202,8 +209,11 @@ def interp_pose(track, t_ns, max_gap_ns=100_000_000):
     j0 = bisect_left(track.times, t_ns - 50_000_000)
     j1 = bisect_right(track.times, t_ns + 50_000_000)
     P, Q = track.pos[j0:j1], track.quat[j0:j1]
+    if len(P) == 0:                      # dropout: no samples near the shot
+        P, Q = track.pos[i - 1:i + 1], track.quat[i - 1:i + 1]
     med = np.median(P, axis=0)
     return {'pos': pos, 'quat': quat, 'still_ms': 0.0,
+            'gap_ms': (t1 - t0) / 1e6,
             'pos_spread_mm': float(np.max(np.linalg.norm(P - med, axis=1))) * 1e3,
             'rot_spread_deg': math.degrees(
                 max(_quat_angle(q, _quat_mean(Q)) for q in Q))}, None
@@ -232,6 +242,7 @@ def match_still_pose(track, t_ns, pos_thresh_m, rot_thresh_rad, min_samples=20):
         span_ms = (track.times[i1 - 1] - track.times[i0]) / 1e6
         if pos_spread <= pos_thresh_m and rot_spread <= rot_thresh_rad:
             return {'pos': med, 'quat': qm, 'still_ms': span_ms,
+                    'gap_ms': float(np.max(np.diff(track.times[i0:i1]))) / 1e6,
                     'pos_spread_mm': pos_spread * 1e3,
                     'rot_spread_deg': math.degrees(rot_spread)}, None
         if best is None or pos_spread < best[0]:
@@ -330,13 +341,13 @@ def process_session(args):
             rejected.append((rel, f'EXIF parse failed: {e}'))
             continue
         t_ns = int(round((ex['epoch_s'] + offset) * 1e9))
-        if args.interp:
-            res, reason = interp_pose(track, t_ns)
-        else:
+        if args.require_still:
             res, reason = match_still_pose(
                 track, t_ns,
                 pos_thresh_m=args.pos_thresh_mm * 1e-3,
                 rot_thresh_rad=math.radians(args.rot_thresh_deg))
+        else:
+            res, reason = interp_pose(track, t_ns)
         if res is None:
             rejected.append((rel, reason))
             continue
@@ -345,6 +356,7 @@ def process_session(args):
                         *(round(float(v), 6) for v in p),
                         *(round(float(v), 6) for v in q),
                         round(res['still_ms'], 1),
+                        round(res['gap_ms'], 1),
                         round(res['pos_spread_mm'], 2),
                         round(res['rot_spread_deg'], 3),
                         ex['iso'], ex['exposure_s']])
@@ -353,8 +365,8 @@ def process_session(args):
     with open(frames_csv, 'w', newline='') as f:
         wr = csv.writer(f)
         wr.writerow(['image_file', 't_capture_ns', 'x', 'y', 'z',
-                     'qx', 'qy', 'qz', 'qw', 'still_ms', 'pos_spread_mm',
-                     'rot_spread_deg', 'iso', 'exposure_s'])
+                     'qx', 'qy', 'qz', 'qw', 'still_ms', 'gap_ms',
+                     'pos_spread_mm', 'rot_spread_deg', 'iso', 'exposure_s'])
         wr.writerows(sorted(matched, key=lambda r: r[1]))
 
     rej_csv = os.path.join(session, 'rejected.csv')
@@ -468,11 +480,11 @@ def main():
                     help='max rotation spread to count as still (default 0.5; '
                          'Motive orientation noise on small bodies measured '
                          '~0.3-0.4 deg peak, lab test 2026-07-08)')
-    ap.add_argument('--interp', action='store_true',
-                    help='no stillness requirement: interpolate the pose at '
-                         'each photo\'s EXIF timestamp (for photos taken '
-                         'while moving; accuracy = camera speed × clock '
-                         'error, so measure the clock offset carefully)')
+    ap.add_argument('--require-still', action='store_true',
+                    help='opt-in strict mode: only accept photos with a '
+                         'still window around them (default: interpolate '
+                         'the pose at each photo\'s EXIF timestamp, no '
+                         'protocol enforced)')
     ap.add_argument('--self-test', action='store_true',
                     help='run the synthetic matcher test (no session needed)')
     args = ap.parse_args()

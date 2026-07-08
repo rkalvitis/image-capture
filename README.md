@@ -48,9 +48,10 @@ That's the only command needed every session. Output once connected:
 ## Record an iPhone photo session
 
 The dataset pipeline: OptiTrack tracks the iPhone (rigid body **`phone`** in
-Motive) while you photograph the subject **stop-and-shoot** — hold still
-~3 seconds, take the photo (ProRAW), move to the next viewpoint. Poses and
-photos are joined afterwards via EXIF timestamps.
+Motive) while you photograph the subject (ProRAW). Poses and photos are
+joined afterwards via EXIF timestamps — no shooting protocol is enforced,
+but holding still ~1–3 s around each shot makes its pose immune to clock
+error, so it's the recommended habit.
 
 ```bash
 # Terminal 1 — record every rigid body Motive streams (no sudo)
@@ -65,7 +66,7 @@ Session routine:
 1. Start `record-poses`.
 2. **Photograph the ms-clock screen** with the iPhone (measures the
    iPhone↔Mac clock offset).
-3. Shoot the subject stop-and-shoot: still ~3 s → shoot → move. AE/AF-lock
+3. Shoot the subject (pausing ~1–3 s per shot recommended). AE/AF-lock
    each shot, keep the same lens the whole session, 150–300 shots.
 4. Photograph the ms-clock screen again (catches clock drift).
 5. Ctrl-C the recording.
@@ -78,10 +79,13 @@ pixi run match -- datasets/phone_<ts> \
     --clock-shows 14:03:21.132 --clock-shows 14:41:07.850
 ```
 
-Output: `frames.csv` (one row per photo: capture time, median pose over the
-still window, stillness quality, ISO/shutter) and `rejected.csv` (photos
-taken while moving). Test the pipeline without hardware:
-`pixi run record-mock` and `python scripts/match_photos.py --self-test`.
+Output: `frames.csv` — one row per photo: capture time, the pose
+interpolated at that instant, and quality columns to filter on afterwards
+(`gap_ms` = pose-sample spacing, large means a tracking dropout;
+`pos_spread_mm` / `rot_spread_deg` = camera motion around the shot).
+`--require-still` switches to strict mode that only accepts shots with a
+still window. Test without hardware: `pixi run record-mock` and
+`python scripts/match_photos.py --self-test`.
 
 ## Visualize (optional)
 
