@@ -41,6 +41,9 @@ git = "*"
 pip = "*"
 # Image handling in scripts/ (photo pipeline).
 pillow = ">=10"
+# notebooks/ — interactive 3D dataset visualization (camera poses vs insect).
+plotly = "*"
+ipykernel = "*"
 
 [feature.optitrack.pypi-dependencies]
 # natnet_py: Jerome Guzzi's pure-Python NatNet client. Editable install from
