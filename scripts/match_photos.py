@@ -410,8 +410,10 @@ def main():
                          '--clock-shows)')
     ap.add_argument('--pos-thresh-mm', type=float, default=2.0,
                     help='max position spread to count as still (default 2.0)')
-    ap.add_argument('--rot-thresh-deg', type=float, default=0.3,
-                    help='max rotation spread to count as still (default 0.3)')
+    ap.add_argument('--rot-thresh-deg', type=float, default=0.5,
+                    help='max rotation spread to count as still (default 0.5; '
+                         'Motive orientation noise on small bodies measured '
+                         '~0.3-0.4 deg peak, lab test 2026-07-08)')
     ap.add_argument('--self-test', action='store_true',
                     help='run the synthetic matcher test (no session needed)')
     args = ap.parse_args()
