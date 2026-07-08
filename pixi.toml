@@ -42,8 +42,10 @@ pip = "*"
 # Image handling in scripts/ (photo pipeline).
 pillow = ">=10"
 # notebooks/ — interactive 3D dataset visualization (camera poses vs insect).
+# nbformat: required by plotly's in-notebook mime renderer (fig.show()).
 plotly = "*"
 ipykernel = "*"
+nbformat = ">=4.2"
 
 [feature.optitrack.pypi-dependencies]
 # natnet_py: Jerome Guzzi's pure-Python NatNet client. Editable install from
