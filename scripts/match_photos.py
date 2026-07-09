@@ -24,13 +24,22 @@ applied to every photo timestamp. Two clock photos also expose clock drift.
 Alternatively pass --clock-offset SECONDS directly; with neither, 0 is used
 (fine for stop-and-shoot if both devices are NTP-synced, but measure it).
 
+Output frame (default): the camera pose is expressed **in the insect's
+body frame** (relative pose = object_pose⁻¹ ∘ camera_pose, both bodies
+interpolated at the photo instant). This supports the turntable method —
+fixed camera, insect rotated between shots — where a rotating insect with a
+fixed camera is equivalent to a camera orbiting a fixed insect. It is also
+correct for the older handheld-orbit sessions (there the object simply
+barely moves). --world switches back to raw world-frame camera poses.
+
 Matching (default): the pose is interpolated at each photo's corrected EXIF
 timestamp — no shooting protocol is enforced. Per-row quality columns let
 you filter afterwards: 'gap_ms' (spacing of the bracketing pose samples;
 large = bridged across a tracking dropout) and 'pos_spread_mm' /
-'rot_spread_deg' (camera motion within ±50 ms of the shot — the pose
-uncertainty a tens-of-ms timestamp error causes). Holding still around each
-shot still pays: it makes the pose immune to clock error.
+'rot_spread_deg' (relative camera↔object motion within ±50 ms of the shot —
+the pose uncertainty a tens-of-ms timestamp error causes). Keeping both
+bodies still around each shot (turntable at rest) makes the pose immune to
+clock error.
 
 --require-still (opt-in strict mode): only accept photos with a still
 window around them (largest of ±1.5/±1.0/±0.6/±0.3 s whose pose spread is
@@ -175,6 +184,53 @@ def _quat_angle(q, qm):
     return 2.0 * math.acos(min(1.0, abs(float(np.dot(q, qm)))))
 
 
+def _q_mul(a, b):
+    """Hamilton product of two xyzw quaternions."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array([aw * bx + ax * bw + ay * bz - az * by,
+                     aw * by - ax * bz + ay * bw + az * bx,
+                     aw * bz + ax * by - ay * bx + az * bw,
+                     aw * bw - ax * bx - ay * by - az * bz])
+
+
+def _q_conj(q):
+    return np.array([-q[0], -q[1], -q[2], q[3]])
+
+
+def _q_rot(q, v):
+    """Rotate vector v by xyzw quaternion q."""
+    return _q_mul(_q_mul(q, np.array([v[0], v[1], v[2], 0.0])), _q_conj(q))[:3]
+
+
+def build_relative_track(cam, obj):
+    """Camera poses re-expressed in the (possibly rotating) object body frame.
+
+    For each camera sample, the object pose is interpolated at that instant
+    and the relative transform T_obj→cam = T_world→obj⁻¹ ∘ T_world→cam is
+    taken. Camera samples outside the object track's coverage are skipped.
+    A rotating insect + fixed camera thus becomes a camera orbit around a
+    fixed insect at the origin.
+    """
+    times, pos, quat = [], [], []
+    for k in range(len(cam.times)):
+        t = int(cam.times[k])
+        i = bisect_left(obj.times, t)
+        if i == 0 or i == len(obj.times):
+            continue
+        t0, t1 = int(obj.times[i - 1]), int(obj.times[i])
+        u = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+        p_obj = (1.0 - u) * obj.pos[i - 1] + u * obj.pos[i]
+        q_obj = _slerp(obj.quat[i - 1], obj.quat[i], u)
+        q_inv = _q_conj(q_obj)
+        times.append(t)
+        pos.append(_q_rot(q_inv, cam.pos[k] - p_obj))
+        quat.append(_q_mul(q_inv, cam.quat[k]))
+    if not times:
+        raise SystemExit('camera and object tracks do not overlap in time')
+    return PoseTrack(times, pos, quat)
+
+
 def _slerp(q0, q1, u):
     """Spherical interpolation between two xyzw quaternions, u in [0, 1]."""
     dot = float(np.dot(q0, q1))
@@ -255,7 +311,7 @@ def match_still_pose(track, t_ns, pos_thresh_m, rot_thresh_rad, min_samples=20):
 
 # ─── Bag loading (lazy ROS imports — self-test runs without the overlay) ────
 
-def load_pose_track(bag_dir, rigid_body):
+def load_pose_track(bag_dir, rigid_body, allow_fallback=True):
     import rosbag2_py
     from rclpy.serialization import deserialize_message
     from geometry_msgs.msg import PoseStamped
@@ -267,13 +323,13 @@ def load_pose_track(bag_dir, rigid_body):
               if t.name.startswith('/optitrack/')]
     want = f'/optitrack/{rigid_body}'
     if want not in topics:
-        if len(topics) == 1:
+        if allow_fallback and len(topics) == 1:
             want = topics[0]
             print(f'NOTE: rigid body {rigid_body!r} not in bag; '
                   f'using the only body present: {want}', file=sys.stderr)
         else:
             raise SystemExit(f'rigid body topic {want} not in bag; '
-                             f'available: {topics} (use --rigid-body)')
+                             f'available: {topics}')
 
     times, pos, quat = [], [], []
     while reader.has_next():
@@ -331,6 +387,17 @@ def process_session(args):
               file=sys.stderr)
 
     track = load_pose_track(session, args.rigid_body)
+    if not args.world:
+        try:
+            obj = load_pose_track(session, args.object_body,
+                                  allow_fallback=False)
+        except SystemExit as e:
+            print(f'WARNING: {e} — falling back to world-frame camera poses',
+                  file=sys.stderr)
+        else:
+            track = build_relative_track(track, obj)
+            print(f'poses expressed in the {args.object_body!r} body frame '
+                  f'({len(track.times)} relative samples)')
 
     matched, rejected = [], []
     for pf in photo_files:
@@ -447,6 +514,27 @@ def self_test():
     check('interp: outside pose data rejected',
           resI2 is None and reasonI2.startswith('no pose data'))
 
+    # turntable scenario: camera FIXED, object rotating 45 deg/s about z.
+    # In the object frame the camera must orbit: at t the relative position
+    # is R(-45t°) @ cam_pos and the relative orientation is q_z(-45t°).
+    cam_p = np.array([0.5, 0.0, 0.2])
+    tt, tp, tq = [], [], []
+    ot, op, oq = [], [], []
+    for i in range(8 * hz):
+        t = i / hz
+        tt.append(t0 + int(t * 1e9)); tp.append(cam_p); tq.append(q_z(0))
+        ot.append(t0 + int(t * 1e9)); op.append(np.zeros(3))
+        oq.append(q_z(45.0 * t))
+    rel = build_relative_track(PoseTrack(tt, tp, tq), PoseTrack(ot, op, oq))
+    resR, _ = interp_pose(rel, t_at(2.0))          # object rotated 90 deg
+    expect_p = np.array([0.0, -0.5, 0.2])          # R(-90°) @ (0.5, 0, 0.2)
+    check('turntable: fixed camera orbits in object frame',
+          resR is not None and np.linalg.norm(resR['pos'] - expect_p) < 0.001
+          and abs(_quat_angle(resR['quat'], q_z(-90))) < math.radians(0.1))
+    check('turntable: orbit radius constant',
+          abs(np.linalg.norm(rel.pos[:, :2], axis=1).max() - 0.5) < 1e-6
+          and abs(np.linalg.norm(rel.pos[:, :2], axis=1).min() - 0.5) < 1e-6)
+
     # clock-offset math: photo EXIF says 10:00:00.000, screen showed 10:00:00.500
     tz = timezone(timedelta(hours=2))
     exif_epoch = datetime(2026, 7, 7, 10, 0, 0, tzinfo=tz).timestamp()
@@ -467,6 +555,14 @@ def main():
                     help='session folder (datasets/phone_<ts>)')
     ap.add_argument('--rigid-body', default='phone',
                     help="Motive rigid body of the iPhone (default: phone)")
+    ap.add_argument('--object-body', default='popillia',
+                    help="Motive rigid body of the photographed object; "
+                         "camera poses are output in ITS body frame, so a "
+                         "rotating object + fixed camera becomes a camera "
+                         "orbit (default: popillia)")
+    ap.add_argument('--world', action='store_true',
+                    help='output raw world-frame camera poses instead of '
+                         'object-frame relative poses')
     ap.add_argument('--clock-shows', action='append', default=[],
                     metavar='HH:MM:SS.mmm',
                     help='time visible in a clock photo; repeat per clock photo '

@@ -47,11 +47,16 @@ That's the only command needed every session. Output once connected:
 
 ## Record an iPhone photo session
 
-The dataset pipeline: OptiTrack tracks the iPhone (rigid body **`phone`** in
-Motive) while you photograph the subject (ProRAW). Poses and photos are
-joined afterwards via EXIF timestamps — no shooting protocol is enforced,
-but holding still ~1–3 s around each shot makes its pose immune to clock
-error, so it's the recommended habit.
+The dataset pipeline (**turntable method**): the iPhone (rigid body
+**`phone`**) sits fixed on a stand while the insect (rigid body
+**`popillia`**) is rotated 360° in steps — ~20 photos per revolution — then
+the camera is raised to the next height and the revolution is repeated.
+OptiTrack tracks both bodies, so the matcher outputs each photo's camera
+pose **in the insect's body frame**: a rotating insect with a fixed camera
+becomes a camera orbit around a fixed insect, which is exactly what
+reconstruction wants. Photos are joined to poses via EXIF timestamps — no
+protocol is enforced, but shooting while the turntable is at rest makes
+each pose immune to clock error.
 
 ```bash
 # Terminal 1 — record every rigid body Motive streams (no sudo)
@@ -66,8 +71,9 @@ Session routine:
 1. Start `record-poses`.
 2. **Photograph the ms-clock screen** with the iPhone (measures the
    iPhone↔Mac clock offset).
-3. Shoot the subject (pausing ~1–3 s per shot recommended). AE/AF-lock
-   each shot, keep the same lens the whole session, 150–300 shots.
+3. Shoot ring by ring: rotate the insect a step (~18°), let it settle,
+   shoot; after a full revolution (~20 shots) raise the camera to the next
+   height and repeat. AE/AF-lock, same lens the whole session.
 4. Photograph the ms-clock screen again (catches clock drift).
 5. Ctrl-C the recording.
 6. AirDrop the DNGs into `datasets/phone_<ts>/photos/`, the two clock shots
@@ -79,13 +85,16 @@ pixi run match -- datasets/phone_<ts> \
     --clock-shows 14:03:21.132 --clock-shows 14:41:07.850
 ```
 
-Output: `frames.csv` — one row per photo: capture time, the pose
-interpolated at that instant, and quality columns to filter on afterwards
-(`gap_ms` = pose-sample spacing, large means a tracking dropout;
-`pos_spread_mm` / `rot_spread_deg` = camera motion around the shot).
-`--require-still` switches to strict mode that only accepts shots with a
-still window. Test without hardware: `pixi run record-mock` and
-`python scripts/match_photos.py --self-test`.
+Output: `frames.csv` — one row per photo: capture time, the camera pose in
+the **insect body frame** (insect at the origin; `--world` for raw
+world-frame poses, `--object-body` to change the object), and quality
+columns to filter on afterwards (`gap_ms` = pose-sample spacing, large
+means a tracking dropout; `pos_spread_mm` / `rot_spread_deg` = relative
+camera↔insect motion around the shot). `--require-still` switches to
+strict mode that only accepts shots taken with the turntable at rest.
+Test without hardware: `pixi run record-mock` and
+`python scripts/match_photos.py --self-test`. Inspect a session's camera
+constellation in 3D with `notebooks/camera_positions.ipynb`.
 
 ## Visualize (optional)
 
