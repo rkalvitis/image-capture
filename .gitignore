@@ -16,3 +16,5 @@ datasets/
 .CLAUDE
 docs/
 photos/
+# local development-process journal (kept untracked by choice)
+thesis/
