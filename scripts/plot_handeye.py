@@ -247,6 +247,27 @@ def main():
             name=f'{name}  ({t[0]:.0f},{t[1]:.0f},{t[2]:.0f}) mm',
             hovertemplate=f'{name}<br>x=%{{x:.1f}} y=%{{y:.1f}} '
                           f'z=%{{z:.1f}} mm<extra></extra>'))
+    # ETH-ASL dual-quaternion result (independent solver) — read from the
+    # session's hand_eye_eth.yaml if calibrate-handeye-eth has been run
+    eth_path = (f'calibration/{os.path.basename(args.session.rstrip("/"))}/'
+                f'hand_eye_eth.yaml')
+    if os.path.exists(eth_path):
+        with open(eth_path) as f:
+            eth = yaml.safe_load(f)
+        t = np.array(eth['camera_in_body']['translation_m']) * 1000
+        fig.add_trace(go.Scatter3d(
+            x=[t[0]], y=[t[1]], z=[t[2]], mode='markers',
+            marker=dict(size=10, color='#e87ba4', symbol='diamond-open',
+                        line=dict(color='#e87ba4', width=4)),
+            name=f'ETH DQ-RANSAC  ({t[0]:.0f},{t[1]:.0f},{t[2]:.0f}) mm',
+            hovertemplate=(f'ETH DQ-RANSAC '
+                           f'({eth["n_inliers"]}/{eth["n_pairs"]} inliers)'
+                           f'<br>x=%{{x:.1f}} y=%{{y:.1f}} z=%{{z:.1f}} mm'
+                           f'<extra></extra>')))
+        print(f'ETH result included from {eth_path}')
+    else:
+        print(f'NOTE: {eth_path} not found — run calibrate-handeye-eth to '
+              'include the ETH solver in the plot')
     look = R_x @ np.array([0, 0, 1.0])         # camera optical axis (cam +z)
     tip = t_x * 1000 + look * ax_len * 0.6
     fig.add_trace(go.Scatter3d(
