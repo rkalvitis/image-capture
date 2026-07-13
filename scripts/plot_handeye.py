@@ -160,9 +160,10 @@ def main():
                     help='marker constellation from scripts/dump_rigid_bodies.py '
                          '(skipped if the file does not exist)')
     ap.add_argument('--method', default=None,
-                    help='which solver anchors the sketch/look direction '
-                         '(default: the method stored in calibration/'
-                         'hand_eye.yaml, else PARK)')
+                    help='which solver anchors the sketch/look direction: '
+                         'ETH, TSAI, PARK, HORAUD, ANDREFF or DANIILIDIS '
+                         '(default: ETH when hand_eye_eth.yaml exists, '
+                         'else PARK)')
     ap.add_argument('--out', default=None,
                     help='output HTML; default: '
                          'calibration/<session>/hand_eye_view.html')
@@ -181,17 +182,32 @@ def main():
         raise SystemExit(f'only {n} usable photos')
 
     results = solve_all_methods(R_g2b, t_g2b, R_t2c, t_t2c)
+
+    # ETH result (independent solver), if calibrate-handeye-eth has been run
+    eth_path = (f'calibration/{os.path.basename(args.session.rstrip("/"))}/'
+                f'hand_eye_eth.yaml')
+    eth = None
+    if os.path.exists(eth_path):
+        with open(eth_path) as f:
+            eth = yaml.safe_load(f)
+
+    # anchor for the sketch / look direction / lens circle: ETH when
+    # available (most robust on our data so far), else the stored method
     method = args.method
     if method is None:
-        try:
-            with open('calibration/hand_eye.yaml') as f:
-                method = yaml.safe_load(f).get('method', 'PARK')
-        except OSError:
-            method = 'PARK'
-    if method not in results:
-        raise SystemExit(f'method {method!r} not available (got {list(results)})')
+        method = 'ETH' if eth else 'PARK'
+    if method == 'ETH':
+        if eth is None:
+            raise SystemExit(f'--method ETH needs {eth_path} — run '
+                             'calibrate-handeye-eth first')
+        t_x = np.array(eth['camera_in_body']['translation_m'])
+        R_x = quat_to_R(np.array(eth['camera_in_body']['quaternion_xyzw']))
+    elif method in results:
+        R_x, t_x = results[method]
+    else:
+        raise SystemExit(f'method {method!r} not available '
+                         f'(got ETH + {list(results)})')
     print(f'sketch/look anchored to method: {method}')
-    R_x, t_x = results[method]
 
     # mean board pose in world (via the PARK solution), then per-shot camera
     # position in the body frame: X_i = T_w2b_i^-1 . T_w2board . T_t2c_i^-1
@@ -247,13 +263,8 @@ def main():
             name=f'{name}  ({t[0]:.0f},{t[1]:.0f},{t[2]:.0f}) mm',
             hovertemplate=f'{name}<br>x=%{{x:.1f}} y=%{{y:.1f}} '
                           f'z=%{{z:.1f}} mm<extra></extra>'))
-    # ETH-ASL dual-quaternion result (independent solver) — read from the
-    # session's hand_eye_eth.yaml if calibrate-handeye-eth has been run
-    eth_path = (f'calibration/{os.path.basename(args.session.rstrip("/"))}/'
-                f'hand_eye_eth.yaml')
-    if os.path.exists(eth_path):
-        with open(eth_path) as f:
-            eth = yaml.safe_load(f)
+    # ETH-ASL dual-quaternion result (independent solver)
+    if eth is not None:
         t = np.array(eth['camera_in_body']['translation_m']) * 1000
         fig.add_trace(go.Scatter3d(
             x=[t[0]], y=[t[1]], z=[t[2]], mode='markers',
