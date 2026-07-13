@@ -220,6 +220,9 @@ def main():
                     metavar='HH:MM:SS.mmm')
     ap.add_argument('--clock-offset', type=float, default=None, metavar='SEC')
     ap.add_argument('--min-corners', type=int, default=12)
+    ap.add_argument('--method', default='PARK', choices=sorted(METHODS),
+                    help='which solver result to store (default PARK; all '
+                         'five are reported for comparison)')
     ap.add_argument('--out', default='calibration/hand_eye.yaml')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
@@ -255,7 +258,7 @@ def main():
     for name, (R, t) in results.items():
         print(f'  {name:10s} t = {np.round(t * 1000, 2).tolist()} mm, '
               f'quat = {np.round(R_to_quat(R), 5).tolist()}')
-    R_ref, t_ref = results['PARK']
+    R_ref, t_ref = results[args.method]
     spread_rot = max(rot_angle_deg(R.T @ R_ref) for R, _ in results.values())
     spread_tr = max(np.linalg.norm(t - t_ref) * 1000
                     for _, t in results.values())
@@ -301,7 +304,7 @@ def main():
                 'translation_m': [float(v) for v in t_ref],
                 'quaternion_xyzw': [float(v) for v in R_to_quat(R_ref)],
             },
-            'method': 'PARK',
+            'method': args.method,
             'n_photos': n,
             'max_relative_rotation_deg': float(max_rel),
             'method_agreement': {'rot_deg': float(spread_rot),

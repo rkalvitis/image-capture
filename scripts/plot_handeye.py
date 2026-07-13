@@ -78,67 +78,72 @@ def _circle(ca, cb, r, n=24):
 def _phone_sketch(origin, u, v, nvec, side):
     """Wireframe polylines (mm) of the schematic phone in an (u, v, n) frame.
 
-    origin = lens position; the back glass lies in the c=0 plane, the body
-    slab extends `side`·thickness along n, the camera module protrudes the
-    opposite way. Returns plotly xs/ys/zs with None separators.
+    origin = the point on the SCREEN plane below the ultra-wide lens; the
+    body slab extends side*thickness along n (the screen rests at c = 0),
+    the camera module protrudes further to side*(thickness + bump), and the
+    lens circles sit on the module face. Returns (paths, uw_circle).
     """
     def to3(a, b, c):
         return (origin + (a * u + b * v + c * nvec) / 1000.0) * 1000
 
+    c_back = side * PHONE_T
+    c_mod = side * (PHONE_T + CAM_BOX['bump'])              # module outer face
     a0, a1 = -LENS_FROM_TOP, PHONE_L - LENS_FROM_TOP
     b0, b1 = -LENS_FROM_EDGE, PHONE_W - LENS_FROM_EDGE
     body = _rounded_rect(a0, a1, b0, b1, PHONE_R)
     cam = _rounded_rect(CAM_BOX['a0'], CAM_BOX['a1'],
                         CAM_BOX['b0'], CAM_BOX['b1'], CAM_BOX['r'])
-    face = -side * CAM_BOX['bump']                          # module outer face
     paths = [
-        [to3(a, b, 0.0) for a, b in body],                  # back face
-        [to3(a, b, side * PHONE_T) for a, b in body],       # front face
-        [to3(a, b, 0.0) for a, b in cam],                   # camera module
-        [to3(a, b, face) for a, b in cam],                  # module top
+        [to3(a, b, 0.0) for a, b in body],                  # screen face
+        [to3(a, b, c_back) for a, b in body],               # back face
+        [to3(a, b, c_back) for a, b in cam],                # camera module
+        [to3(a, b, c_mod) for a, b in cam],                 # module top
     ]
     for ca, cb in OTHER_LENSES:                             # main + telephoto
-        paths.append([to3(a, b, face) for a, b in _circle(ca, cb, LENS_R)])
+        paths.append([to3(a, b, c_mod) for a, b in _circle(ca, cb, LENS_R)])
     # connectors between the two body faces (at the four side midpoints)
     for a, b in (( (a0 + a1) / 2, b0), ((a0 + a1) / 2, b1),
                  (a0, (b0 + b1) / 2), (a1, (b0 + b1) / 2)):
-        paths.append([to3(a, b, 0.0), to3(a, b, side * PHONE_T)])
+        paths.append([to3(a, b, 0.0), to3(a, b, c_back)])
     xs, ys, zs = [], [], []
     for path in paths:
         for p in path:
             xs.append(p[0]); ys.append(p[1]); zs.append(p[2])
         xs.append(None); ys.append(None); zs.append(None)
-    # ultra-wide lens circle separately: centered on the anchor = the
-    # solved camera position, so the match is visible in the plot
-    uw = [to3(a, b, face) for a, b in _circle(0.0, 0.0, LENS_R)]
+    # ultra-wide lens circle separately, on the module face at the anchor
+    uw = [to3(a, b, c_mod) for a, b in _circle(0.0, 0.0, LENS_R)]
     uw_xyz = ([p[0] for p in uw], [p[1] for p in uw], [p[2] for p in uw])
     return (xs, ys, zs), uw_xyz
 
 
 def phone_wireframe(R_x, t_x):
     """Fallback sketch in the camera frame (no marker plane available), mm."""
-    sketch, uw = _phone_sketch(t_x, R_x[:, 0], R_x[:, 1], R_x[:, 2], side=-1.0)
-    return sketch, uw
+    look = R_x[:, 2]
+    origin = t_x - (PHONE_T + CAM_BOX['bump']) / 1000.0 * look
+    return _phone_sketch(origin, R_x[:, 0], R_x[:, 1], look, side=1.0)
 
 
 def phone_wireframe_on_plane(R_x, t_x, marker_pos):
     """Sketch seated on the plane of markers 2/3/4 (the mounting plate), mm.
 
-    Also returns the solved lens's distance to that plane — physically it
-    should be a few mm (back of phone + camera bump on the plate), so a
-    large value flags hand-eye translation error along the plane normal.
+    The phone occupies the side of the plate the camera LOOKS toward (the
+    board it photographed was in front of the lens — this is the provable
+    side, independent of the noisy translation). Physically the lens should
+    then sit ~+(thickness+bump) from the plate on that side; the returned
+    signed lens-to-plane distance is printed as a validation number.
     """
     p = [marker_pos[name] for name in PHONE_PLANE_MARKERS]
     n = np.cross(p[1] - p[0], p[2] - p[0])
     n /= np.linalg.norm(n)
+    look = R_x[:, 2]
+    side = 1.0 if np.dot(look, n) > 0 else -1.0   # the side the camera views
     d_lens = float(np.dot(t_x - p[0], n))
-    side = -1.0 if d_lens < 0 else 1.0          # phone occupies the lens side
     anchor = t_x - d_lens * n                   # lens projected onto the plane
     u = R_x[:, 0] - np.dot(R_x[:, 0], n) * n    # camera x projected in-plane
     u /= np.linalg.norm(u)
     v = np.cross(n, u)
     sketch, uw = _phone_sketch(anchor, u, v, n, side)
-    return sketch, uw, d_lens
+    return sketch, uw, d_lens, side
 
 
 def main():
@@ -154,6 +159,10 @@ def main():
     ap.add_argument('--markers', default='calibration/rigid_bodies.yaml',
                     help='marker constellation from scripts/dump_rigid_bodies.py '
                          '(skipped if the file does not exist)')
+    ap.add_argument('--method', default=None,
+                    help='which solver anchors the sketch/look direction '
+                         '(default: the method stored in calibration/'
+                         'hand_eye.yaml, else PARK)')
     ap.add_argument('--out', default='calibration/hand_eye_view.html')
     ap.add_argument('--no-open', action='store_true',
                     help="don't open the result in the browser")
@@ -169,7 +178,17 @@ def main():
         raise SystemExit(f'only {n} usable photos')
 
     results = solve_all_methods(R_g2b, t_g2b, R_t2c, t_t2c)
-    R_x, t_x = results['PARK']
+    method = args.method
+    if method is None:
+        try:
+            with open('calibration/hand_eye.yaml') as f:
+                method = yaml.safe_load(f).get('method', 'PARK')
+        except OSError:
+            method = 'PARK'
+    if method not in results:
+        raise SystemExit(f'method {method!r} not available (got {list(results)})')
+    print(f'sketch/look anchored to method: {method}')
+    R_x, t_x = results[method]
 
     # mean board pose in world (via the PARK solution), then per-shot camera
     # position in the body frame: X_i = T_w2b_i^-1 . T_w2board . T_t2c_i^-1
@@ -230,7 +249,7 @@ def main():
     fig.add_trace(go.Scatter3d(
         x=[t_x[0] * 1000, tip[0]], y=[t_x[1] * 1000, tip[1]],
         z=[t_x[2] * 1000, tip[2]], mode='lines',
-        line=dict(color='#55524c', width=6), name='look direction (PARK)',
+        line=dict(color='#55524c', width=6), name=f'look direction ({method})',
         hoverinfo='skip'))
 
     # rigid-body markers (from Motive, via scripts/dump_rigid_bodies.py)
@@ -264,9 +283,12 @@ def main():
     # schematic iPhone outline — seated on the marker-2/3/4 plate plane when
     # the constellation is known; camera-frame fallback otherwise
     if marker_pos and all(k in marker_pos for k in PHONE_PLANE_MARKERS):
-        (xs, ys, zs), uw, d_lens = phone_wireframe_on_plane(R_x, t_x, marker_pos)
+        (xs, ys, zs), uw, d_lens, side = phone_wireframe_on_plane(
+            R_x, t_x, marker_pos)
+        expect = side * (PHONE_T + CAM_BOX['bump'])
         print(f'solved lens vs marker-2/3/4 plate plane: {d_lens * 1000:+.1f} mm '
-              '(physically expect a few mm — larger = hand-eye translation error)')
+              f'(physically expect ≈ {expect:+.1f} mm on the side the camera '
+              f'looks toward; wrong sign or large deviation = translation error)')
         sketch_name = 'iPhone 15 Pro (on m2/m3/m4 plane, approx.)'
     else:
         (xs, ys, zs), uw = phone_wireframe(R_x, t_x)
