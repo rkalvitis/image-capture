@@ -28,8 +28,8 @@ import plotly.graph_objects as go
 import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from calibrate_handeye import (collect_pairs, solve_all_methods, R_to_quat,
-                               quat_to_R)
+from calibrate_handeye import (collect_pairs, resolve_ambiguity,
+                               solve_all_methods, R_to_quat, quat_to_R)
 
 # categorical palette (fixed order); gray for the per-shot cloud
 CAT = ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7']
@@ -170,6 +170,7 @@ def main():
 
     pairs = collect_pairs(args.session, args.intrinsics, args.rigid_body,
                           args.clock_shows, args.clock_offset, args.min_corners)
+    resolve_ambiguity(pairs)
     R_g2b, t_g2b = pairs['R_g2b'], pairs['t_g2b']
     R_t2c, t_t2c = pairs['R_t2c'], pairs['t_t2c']
     used = pairs['used']

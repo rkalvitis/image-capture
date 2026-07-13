@@ -171,7 +171,8 @@ def collect_pairs(session, intrinsics_path, rigid_body='phone',
     if not photos:
         raise SystemExit(f'no DNGs in {session}/photos/')
 
-    R_g2b, t_g2b, R_t2c, t_t2c, img_pts, obj_pts, used = [], [], [], [], [], [], []
+    R_g2b, t_g2b, R_t2c, t_t2c = [], [], [], []
+    img_pts, obj_pts, used, branches = [], [], [], []
     for pf in photos:
         name = os.path.basename(pf)
         ex = read_dng_exif(pf)
@@ -189,24 +190,81 @@ def collect_pairs(session, intrinsics_path, rigid_body='phone',
             print(f'  SKIP {name}: board not detected')
             continue
         obj, imgp = det
-        ok, rvec, tvec = cv2.solvePnP(obj, imgp, K, dist,
-                                      flags=cv2.SOLVEPNP_IPPE)
-        if not ok:
+        # planar PnP has a two-fold pose ambiguity — keep BOTH branches;
+        # resolve_ambiguity() picks the right one per shot using the mocap
+        # (the static board's world orientation must be shot-invariant).
+        nsol, rvecs, tvecs, errs = cv2.solvePnPGeneric(
+            obj, imgp, K, dist, flags=cv2.SOLVEPNP_IPPE)
+        if nsol < 1:
             print(f'  SKIP {name}: PnP failed')
             continue
-        rvec, tvec = cv2.solvePnPRefineLM(obj, imgp, K, dist, rvec, tvec)
-        R_t2c.append(cv2.Rodrigues(rvec)[0])
-        t_t2c.append(tvec.ravel())
+        branch = []
+        for rvec, tvec, err in zip(rvecs, tvecs, np.ravel(errs)):
+            rvec, tvec = cv2.solvePnPRefineLM(obj, imgp, K, dist, rvec, tvec)
+            branch.append((cv2.Rodrigues(rvec)[0], tvec.ravel(), float(err)))
+        branch.sort(key=lambda x: x[2])
+        branches.append(branch)
+        R_t2c.append(branch[0][0])
+        t_t2c.append(branch[0][1])
         R_g2b.append(quat_to_R(pose['quat']))
         t_g2b.append(np.asarray(pose['pos']))
         obj_pts.append(obj)
         img_pts.append(imgp)
         used.append(name)
+        ratio = branch[1][2] / max(branch[0][2], 1e-9) if len(branch) > 1 else 99
         print(f'  ok   {name}: {len(imgp)} corners, '
-              f'spread {pose["pos_spread_mm"]:.2f} mm')
+              f'spread {pose["pos_spread_mm"]:.2f} mm, '
+              f'PnP branch ratio {ratio:.2f}'
+              + (' (AMBIGUOUS)' if ratio < 3 else ''))
 
     return dict(K=K, dist=dist, R_g2b=R_g2b, t_g2b=t_g2b, R_t2c=R_t2c,
-                t_t2c=t_t2c, obj_pts=obj_pts, img_pts=img_pts, used=used)
+                t_t2c=t_t2c, obj_pts=obj_pts, img_pts=img_pts, used=used,
+                branches=branches)
+
+
+def resolve_ambiguity(pairs, ratio_thresh=3.0):
+    """Pick the correct planar-PnP branch per shot using the mocap.
+
+    The board is static, so its world orientation implied by every shot
+    (R_wb_i · R_X · R_t2c_i) must be the same. Bootstrap R_X from the
+    unambiguous shots (branch error ratio >= ratio_thresh), build the
+    consensus board orientation, then select for EVERY shot the branch
+    that agrees with it. Modifies pairs in place; returns flip count.
+    """
+    R_b, branches = pairs['R_g2b'], pairs.get('branches')
+    if not branches:
+        return 0
+    clear = [i for i, br in enumerate(branches)
+             if len(br) == 1 or br[1][2] / max(br[0][2], 1e-9) >= ratio_thresh]
+    if len(clear) < 3:
+        print('WARNING: too few unambiguous PnP shots to resolve branch '
+              'ambiguity — results may be corrupted', file=sys.stderr)
+        return 0
+    R_X0, _ = cv2.calibrateHandEye(
+        [R_b[i] for i in clear], [pairs['t_g2b'][i] for i in clear],
+        [branches[i][0][0] for i in clear],
+        [branches[i][0][1] for i in clear],
+        method=cv2.CALIB_HAND_EYE_PARK)
+    quats = np.array([R_to_quat(R_b[i] @ R_X0 @ branches[i][0][0])
+                      for i in clear])
+    quats = np.where((quats @ quats[0])[:, None] < 0, -quats, quats)
+    q = quats.mean(0)
+    R_ref = quat_to_R(q / np.linalg.norm(q))
+
+    flips = 0
+    for i, br in enumerate(branches):
+        best = min(range(len(br)), key=lambda k: rot_angle_deg(
+            (R_b[i] @ R_X0 @ br[k][0]).T @ R_ref))
+        if best != 0:
+            flips += 1
+            print(f'  FLIP {pairs["used"][i]}: mocap consistency selects '
+                  f'PnP branch {best + 1} '
+                  f'(reproj {br[best][2]:.2f} px vs {br[0][2]:.2f} px)')
+        pairs['R_t2c'][i] = br[best][0]
+        pairs['t_t2c'][i] = br[best][1]
+    print(f'planar-PnP ambiguity: {flips} of {len(branches)} shots flipped '
+          f'to the mocap-consistent branch')
+    return flips
 
 
 def main():
@@ -235,6 +293,7 @@ def main():
     session = args.session.rstrip('/')
     pairs = collect_pairs(session, args.intrinsics, args.rigid_body,
                           args.clock_shows, args.clock_offset, args.min_corners)
+    resolve_ambiguity(pairs)
     K, dist = pairs['K'], pairs['dist']
     R_g2b, t_g2b = pairs['R_g2b'], pairs['t_g2b']
     R_t2c, t_t2c = pairs['R_t2c'], pairs['t_t2c']
