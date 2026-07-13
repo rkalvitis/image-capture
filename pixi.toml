@@ -146,6 +146,10 @@ cmd = "python scripts/calibrate_intrinsics.py"
 description = "Hand-eye (phone body -> lens) from a handheld board session. Usage: pixi run calibrate-handeye -- datasets/phone_<ts> [--clock-shows HH:MM:SS.mmm ...]"
 cmd = "python scripts/calibrate_handeye.py"
 
+[tasks.dump-bodies]
+description = "Dump every rigid body's marker constellation from Motive to calibration/rigid_bodies.yaml (run in the lab)."
+cmd = "python scripts/dump_rigid_bodies.py"
+
 [tasks.rviz-optitrack]
 description = "Launch RViz with the saved Optitrack config."
 cmd = "rviz2 -d rviz/optitrack.rviz"

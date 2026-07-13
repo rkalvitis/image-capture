@@ -25,6 +25,7 @@ import webbrowser
 
 import numpy as np
 import plotly.graph_objects as go
+import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from calibrate_handeye import (collect_pairs, solve_all_methods, R_to_quat,
@@ -33,6 +34,34 @@ from calibrate_handeye import (collect_pairs, solve_all_methods, R_to_quat,
 # categorical palette (fixed order); gray for the per-shot cloud
 CAT = ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7']
 AXIS_COLORS = {'x': '#e34948', 'y': '#1baf7a', 'z': '#2a78d6'}
+
+# iPhone 15 Pro schematic (mm): body 146.6 x 70.6 x 8.25, drawn in the
+# CAMERA frame (x = image right ~ phone long axis, y = image down,
+# z = viewing direction out of the back glass) and anchored to the solved
+# lens position. Where the lens sits on the body is approximate — this is
+# a sketch for orientation, not a measurement.
+PHONE_L, PHONE_W, PHONE_T = 146.6, 70.6, 8.25
+LENS_FROM_TOP, LENS_FROM_EDGE = 20.0, 13.0
+
+
+def phone_wireframe(R_x, t_x):
+    """12 box edges of the schematic phone, transformed into the body frame (mm)."""
+    x0, x1 = -LENS_FROM_TOP, PHONE_L - LENS_FROM_TOP
+    y0, y1 = -LENS_FROM_EDGE, PHONE_W - LENS_FROM_EDGE
+    z0, z1 = -PHONE_T, 0.0                      # back glass through the lens
+    corners_cam = np.array([[x, y, z] for x in (x0, x1)
+                            for y in (y0, y1) for z in (z0, z1)]) / 1000.0
+    corners = (R_x @ corners_cam.T).T + t_x     # -> body frame (m)
+    corners *= 1000                             # mm
+    edges = [(0, 1), (2, 3), (4, 5), (6, 7),    # along z
+             (0, 2), (1, 3), (4, 6), (5, 7),    # along y
+             (0, 4), (1, 5), (2, 6), (3, 7)]    # along x
+    xs, ys, zs = [], [], []
+    for a, b in edges:
+        xs += [corners[a, 0], corners[b, 0], None]
+        ys += [corners[a, 1], corners[b, 1], None]
+        zs += [corners[a, 2], corners[b, 2], None]
+    return xs, ys, zs
 
 
 def main():
@@ -45,6 +74,9 @@ def main():
                     metavar='HH:MM:SS.mmm')
     ap.add_argument('--clock-offset', type=float, default=None, metavar='SEC')
     ap.add_argument('--min-corners', type=int, default=12)
+    ap.add_argument('--markers', default='calibration/rigid_bodies.yaml',
+                    help='marker constellation from scripts/dump_rigid_bodies.py '
+                         '(skipped if the file does not exist)')
     ap.add_argument('--out', default='calibration/hand_eye_view.html')
     ap.add_argument('--no-open', action='store_true',
                     help="don't open the result in the browser")
@@ -123,6 +155,35 @@ def main():
         z=[t_x[2] * 1000, tip[2]], mode='lines',
         line=dict(color='#55524c', width=6), name='look direction (PARK)',
         hoverinfo='skip'))
+
+    # rigid-body markers (from Motive, via scripts/dump_rigid_bodies.py)
+    if os.path.exists(args.markers):
+        with open(args.markers) as f:
+            bodies = yaml.safe_load(f)['bodies']
+        body = bodies.get(args.rigid_body)
+        if body:
+            pts = np.array([m['position_m'] for m in body['markers']]) * 1000
+            names = [m['name'] for m in body['markers']]
+            fig.add_trace(go.Scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode='markers',
+                marker=dict(size=9, color='#eb6834', opacity=0.9),
+                name=f'{args.rigid_body} markers (n={len(pts)})',
+                customdata=names,
+                hovertemplate='<b>%{customdata}</b><br>x=%{x:.1f} '
+                              'y=%{y:.1f} z=%{z:.1f} mm<extra></extra>'))
+            print(f'markers: {len(pts)} from {args.markers}')
+        else:
+            print(f'NOTE: body {args.rigid_body!r} not in {args.markers}')
+    else:
+        print(f'NOTE: {args.markers} not found — run `pixi run dump-bodies` '
+              'in the lab to include the marker constellation')
+
+    # schematic iPhone outline anchored to the solved lens pose
+    xs, ys, zs = phone_wireframe(R_x, t_x)
+    fig.add_trace(go.Scatter3d(
+        x=xs, y=ys, z=zs, mode='lines',
+        line=dict(color='#8a8781', width=3),
+        name='iPhone 15 Pro (schematic, approx.)', hoverinfo='skip'))
 
     fig.update_layout(
         title=f'Camera in the phone rigid-body frame — {args.session}',
