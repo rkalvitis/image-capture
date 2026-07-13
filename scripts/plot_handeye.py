@@ -35,33 +35,61 @@ from calibrate_handeye import (collect_pairs, solve_all_methods, R_to_quat,
 CAT = ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7']
 AXIS_COLORS = {'x': '#e34948', 'y': '#1baf7a', 'z': '#2a78d6'}
 
-# iPhone 15 Pro schematic (mm): body 146.6 x 70.6 x 8.25, drawn in the
-# CAMERA frame (x = image right ~ phone long axis, y = image down,
-# z = viewing direction out of the back glass) and anchored to the solved
-# lens position. Where the lens sits on the body is approximate — this is
-# a sketch for orientation, not a measurement.
+# iPhone 15 Pro schematic (mm): body 146.6 x 70.6 x 8.25. Physical setup
+# (2026-07-13): the phone rests flat on the plate whose plane is defined by
+# markers 2/3/4 of the `phone` body — the sketch is seated on that plane
+# when the marker file is available, anchored in-plane at the projected
+# lens position (lens placement on the body remains approximate).
 PHONE_L, PHONE_W, PHONE_T = 146.6, 70.6, 8.25
 LENS_FROM_TOP, LENS_FROM_EDGE = 20.0, 13.0
+PHONE_PLANE_MARKERS = ('marker_2', 'marker_3', 'marker_4')
 
 
-def phone_wireframe(R_x, t_x):
-    """12 box edges of the schematic phone, transformed into the body frame (mm)."""
-    x0, x1 = -LENS_FROM_TOP, PHONE_L - LENS_FROM_TOP
-    y0, y1 = -LENS_FROM_EDGE, PHONE_W - LENS_FROM_EDGE
-    z0, z1 = -PHONE_T, 0.0                      # back glass through the lens
-    corners_cam = np.array([[x, y, z] for x in (x0, x1)
-                            for y in (y0, y1) for z in (z0, z1)]) / 1000.0
-    corners = (R_x @ corners_cam.T).T + t_x     # -> body frame (m)
-    corners *= 1000                             # mm
-    edges = [(0, 1), (2, 3), (4, 5), (6, 7),    # along z
-             (0, 2), (1, 3), (4, 6), (5, 7),    # along y
-             (0, 4), (1, 5), (2, 6), (3, 7)]    # along x
+def _box_edges(corners):
+    edges = [(0, 1), (2, 3), (4, 5), (6, 7),
+             (0, 2), (1, 3), (4, 6), (5, 7),
+             (0, 4), (1, 5), (2, 6), (3, 7)]
     xs, ys, zs = [], [], []
     for a, b in edges:
         xs += [corners[a, 0], corners[b, 0], None]
         ys += [corners[a, 1], corners[b, 1], None]
         zs += [corners[a, 2], corners[b, 2], None]
     return xs, ys, zs
+
+
+def phone_wireframe(R_x, t_x):
+    """Fallback sketch in the camera frame (no marker plane available), mm."""
+    x0, x1 = -LENS_FROM_TOP, PHONE_L - LENS_FROM_TOP
+    y0, y1 = -LENS_FROM_EDGE, PHONE_W - LENS_FROM_EDGE
+    z0, z1 = -PHONE_T, 0.0                      # back glass through the lens
+    corners_cam = np.array([[x, y, z] for x in (x0, x1)
+                            for y in (y0, y1) for z in (z0, z1)]) / 1000.0
+    corners = ((R_x @ corners_cam.T).T + t_x) * 1000
+    return _box_edges(corners)
+
+
+def phone_wireframe_on_plane(R_x, t_x, marker_pos):
+    """Sketch seated on the plane of markers 2/3/4 (the mounting plate), mm.
+
+    Also returns the solved lens's distance to that plane — physically it
+    should be a few mm (back of phone + camera bump on the plate), so a
+    large value flags hand-eye translation error along the plane normal.
+    """
+    p = [marker_pos[name] for name in PHONE_PLANE_MARKERS]
+    n = np.cross(p[1] - p[0], p[2] - p[0])
+    n /= np.linalg.norm(n)
+    d_lens = float(np.dot(t_x - p[0], n))
+    side = -1.0 if d_lens < 0 else 1.0          # phone occupies the lens side
+    anchor = t_x - d_lens * n                   # lens projected onto the plane
+    u = R_x[:, 0] - np.dot(R_x[:, 0], n) * n    # camera x projected in-plane
+    u /= np.linalg.norm(u)
+    v = np.cross(n, u)
+    corners = []
+    for a in (-LENS_FROM_TOP, PHONE_L - LENS_FROM_TOP):
+        for b in (-LENS_FROM_EDGE, PHONE_W - LENS_FROM_EDGE):
+            for c in (0.0, side * PHONE_T):
+                corners.append(anchor + (a * u + b * v + c * n) / 1000.0)
+    return _box_edges(np.array(corners) * 1000), d_lens
 
 
 def main():
@@ -157,16 +185,22 @@ def main():
         hoverinfo='skip'))
 
     # rigid-body markers (from Motive, via scripts/dump_rigid_bodies.py)
+    marker_pos = None
     if os.path.exists(args.markers):
         with open(args.markers) as f:
             bodies = yaml.safe_load(f)['bodies']
         body = bodies.get(args.rigid_body)
         if body:
-            pts = np.array([m['position_m'] for m in body['markers']]) * 1000
-            names = [m['name'] for m in body['markers']]
+            marker_pos = {m['name']: np.array(m['position_m'])
+                          for m in body['markers']}
+            pts = np.array(list(marker_pos.values())) * 1000
+            names = list(marker_pos.keys())
             fig.add_trace(go.Scatter3d(
-                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode='markers',
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode='markers+text',
                 marker=dict(size=9, color='#eb6834', opacity=0.9),
+                text=[n.replace('marker_', 'm') for n in names],
+                textposition='top center', textfont=dict(size=11,
+                                                         color='#8a5a2b'),
                 name=f'{args.rigid_body} markers (n={len(pts)})',
                 customdata=names,
                 hovertemplate='<b>%{customdata}</b><br>x=%{x:.1f} '
@@ -178,12 +212,20 @@ def main():
         print(f'NOTE: {args.markers} not found — run `pixi run dump-bodies` '
               'in the lab to include the marker constellation')
 
-    # schematic iPhone outline anchored to the solved lens pose
-    xs, ys, zs = phone_wireframe(R_x, t_x)
+    # schematic iPhone outline — seated on the marker-2/3/4 plate plane when
+    # the constellation is known; camera-frame fallback otherwise
+    if marker_pos and all(k in marker_pos for k in PHONE_PLANE_MARKERS):
+        (xs, ys, zs), d_lens = phone_wireframe_on_plane(R_x, t_x, marker_pos)
+        print(f'solved lens vs marker-2/3/4 plate plane: {d_lens * 1000:+.1f} mm '
+              '(physically expect a few mm — larger = hand-eye translation error)')
+        sketch_name = 'iPhone 15 Pro (on m2/m3/m4 plane, approx.)'
+    else:
+        xs, ys, zs = phone_wireframe(R_x, t_x)
+        sketch_name = 'iPhone 15 Pro (schematic, approx.)'
     fig.add_trace(go.Scatter3d(
         x=xs, y=ys, z=zs, mode='lines',
         line=dict(color='#8a8781', width=3),
-        name='iPhone 15 Pro (schematic, approx.)', hoverinfo='skip'))
+        name=sketch_name, hoverinfo='skip'))
 
     fig.update_layout(
         title=f'Camera in the phone rigid-body frame — {args.session}',
