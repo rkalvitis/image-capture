@@ -129,6 +129,86 @@ def self_test():
     return 0 if ok else 1
 
 
+def collect_pairs(session, intrinsics_path, rigid_body='phone',
+                  clock_shows=(), clock_offset=None, min_corners=12):
+    """Gather the matched (body-in-world, board-in-camera) pose pairs.
+
+    Returns a dict with K, dist, R_g2b, t_g2b, R_t2c, t_t2c, obj_pts,
+    img_pts, used — shared by the solver and the visualization script.
+    """
+    with open(intrinsics_path) as f:
+        intr = yaml.safe_load(f)
+    K = np.array(intr['camera_matrix'])
+    dist = np.array(intr['distortion'])
+    board = make_board(intr['board'])
+    print(f'intrinsics: {intrinsics_path} (rms {intr["rms_px"]:.3f} px, '
+          f'board {intr["board"]["squares_x"]}x{intr["board"]["squares_y"]} '
+          f'@ {intr["board"]["square_mm"]:g} mm)')
+
+    # clock offset (same convention as match_photos)
+    session = session.rstrip('/')
+    if clock_offset is not None:
+        offset = clock_offset
+    elif clock_shows:
+        clock_files = sorted(
+            glob(os.path.join(session, 'clock', '*.dng')) +
+            glob(os.path.join(session, 'clock', '*.DNG')),
+            key=lambda p: read_dng_exif(p)['epoch_s'])
+        offsets = [clock_offset_from(s, read_dng_exif(c)['epoch_s'],
+                                     read_dng_exif(c)['tz'])
+                   for s, c in zip(clock_shows, clock_files)]
+        offset = float(np.mean(offsets))
+        print('clock offset: ' + ', '.join(f'{o:+.3f} s' for o in offsets))
+    else:
+        offset = 0.0
+        print('WARNING: no clock offset given — assuming NTP-synced clocks',
+              file=sys.stderr)
+
+    track = load_pose_track(session, rigid_body)
+
+    photos = sorted(glob(os.path.join(session, 'photos', '*.dng')) +
+                    glob(os.path.join(session, 'photos', '*.DNG')))
+    if not photos:
+        raise SystemExit(f'no DNGs in {session}/photos/')
+
+    R_g2b, t_g2b, R_t2c, t_t2c, img_pts, obj_pts, used = [], [], [], [], [], [], []
+    for pf in photos:
+        name = os.path.basename(pf)
+        ex = read_dng_exif(pf)
+        t_ns = int(round((ex['epoch_s'] + offset) * 1e9))
+        pose, reason = interp_pose(track, t_ns)
+        if pose is None:
+            print(f'  SKIP {name}: {reason}')
+            continue
+        if pose['pos_spread_mm'] > 2.0:
+            print(f'  SKIP {name}: moving at shutter '
+                  f'({pose["pos_spread_mm"]:.1f} mm in ±50 ms) — hold still')
+            continue
+        det = detect_board(load_image(pf), board, min_corners)
+        if det is None:
+            print(f'  SKIP {name}: board not detected')
+            continue
+        obj, imgp = det
+        ok, rvec, tvec = cv2.solvePnP(obj, imgp, K, dist,
+                                      flags=cv2.SOLVEPNP_IPPE)
+        if not ok:
+            print(f'  SKIP {name}: PnP failed')
+            continue
+        rvec, tvec = cv2.solvePnPRefineLM(obj, imgp, K, dist, rvec, tvec)
+        R_t2c.append(cv2.Rodrigues(rvec)[0])
+        t_t2c.append(tvec.ravel())
+        R_g2b.append(quat_to_R(pose['quat']))
+        t_g2b.append(np.asarray(pose['pos']))
+        obj_pts.append(obj)
+        img_pts.append(imgp)
+        used.append(name)
+        print(f'  ok   {name}: {len(imgp)} corners, '
+              f'spread {pose["pos_spread_mm"]:.2f} mm')
+
+    return dict(K=K, dist=dist, R_g2b=R_g2b, t_g2b=t_g2b, R_t2c=R_t2c,
+                t_t2c=t_t2c, obj_pts=obj_pts, img_pts=img_pts, used=used)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -149,74 +229,13 @@ def main():
     if not args.session:
         ap.error('session folder required (or --self-test)')
 
-    with open(args.intrinsics) as f:
-        intr = yaml.safe_load(f)
-    K = np.array(intr['camera_matrix'])
-    dist = np.array(intr['distortion'])
-    board = make_board(intr['board'])
-    print(f'intrinsics: {args.intrinsics} (rms {intr["rms_px"]:.3f} px, '
-          f'board {intr["board"]["squares_x"]}x{intr["board"]["squares_y"]} '
-          f'@ {intr["board"]["square_mm"]:g} mm)')
-
-    # clock offset (same convention as match_photos)
     session = args.session.rstrip('/')
-    if args.clock_offset is not None:
-        offset = args.clock_offset
-    elif args.clock_shows:
-        clock_files = sorted(
-            glob(os.path.join(session, 'clock', '*.dng')) +
-            glob(os.path.join(session, 'clock', '*.DNG')),
-            key=lambda p: read_dng_exif(p)['epoch_s'])
-        offsets = [clock_offset_from(s, read_dng_exif(c)['epoch_s'],
-                                     read_dng_exif(c)['tz'])
-                   for s, c in zip(args.clock_shows, clock_files)]
-        offset = float(np.mean(offsets))
-        print('clock offset: ' + ', '.join(f'{o:+.3f} s' for o in offsets))
-    else:
-        offset = 0.0
-        print('WARNING: no clock offset given — assuming NTP-synced clocks',
-              file=sys.stderr)
-
-    track = load_pose_track(session, args.rigid_body)
-
-    photos = sorted(glob(os.path.join(session, 'photos', '*.dng')) +
-                    glob(os.path.join(session, 'photos', '*.DNG')))
-    if not photos:
-        raise SystemExit(f'no DNGs in {session}/photos/')
-
-    R_g2b, t_g2b, R_t2c, t_t2c, img_pts, obj_pts, used = [], [], [], [], [], [], []
-    for pf in photos:
-        name = os.path.basename(pf)
-        ex = read_dng_exif(pf)
-        t_ns = int(round((ex['epoch_s'] + offset) * 1e9))
-        pose, reason = interp_pose(track, t_ns)
-        if pose is None:
-            print(f'  SKIP {name}: {reason}')
-            continue
-        if pose['pos_spread_mm'] > 2.0:
-            print(f'  SKIP {name}: moving at shutter '
-                  f'({pose["pos_spread_mm"]:.1f} mm in ±50 ms) — hold still')
-            continue
-        det = detect_board(load_image(pf), board, args.min_corners)
-        if det is None:
-            print(f'  SKIP {name}: board not detected')
-            continue
-        obj, imgp = det
-        ok, rvec, tvec = cv2.solvePnP(obj, imgp, K, dist,
-                                      flags=cv2.SOLVEPNP_IPPE)
-        if not ok:
-            print(f'  SKIP {name}: PnP failed')
-            continue
-        rvec, tvec = cv2.solvePnPRefineLM(obj, imgp, K, dist, rvec, tvec)
-        R_t2c.append(cv2.Rodrigues(rvec)[0])
-        t_t2c.append(tvec.ravel())
-        R_g2b.append(quat_to_R(pose['quat']))
-        t_g2b.append(np.asarray(pose['pos']))
-        obj_pts.append(obj)
-        img_pts.append(imgp)
-        used.append(name)
-        print(f'  ok   {name}: {len(imgp)} corners, '
-              f'spread {pose["pos_spread_mm"]:.2f} mm')
+    pairs = collect_pairs(session, args.intrinsics, args.rigid_body,
+                          args.clock_shows, args.clock_offset, args.min_corners)
+    K, dist = pairs['K'], pairs['dist']
+    R_g2b, t_g2b = pairs['R_g2b'], pairs['t_g2b']
+    R_t2c, t_t2c = pairs['R_t2c'], pairs['t_t2c']
+    obj_pts, img_pts, used = pairs['obj_pts'], pairs['img_pts'], pairs['used']
 
     n = len(used)
     if n < 8:

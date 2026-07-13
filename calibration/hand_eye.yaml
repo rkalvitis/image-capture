@@ -1,0 +1,23 @@
+date: '2026-07-13T12:23:29'
+session: datasets/phone_20260713_121142
+rigid_body: phone
+intrinsics_file: calibration/intrinsics.yaml
+camera_in_body:
+  translation_m:
+  - -0.030895847306795583
+  - -0.03584640567538055
+  - 0.05676576150045832
+  quaternion_xyzw:
+  - 0.003534322709056455
+  - 0.555268664391903
+  - 0.019076094005449563
+  - 0.8314447194762117
+method: PARK
+n_photos: 12
+max_relative_rotation_deg: 178.87381876594142
+method_agreement:
+  rot_deg: 1.9552626320216568
+  trans_mm: 24.657429929280468
+reprojection_px:
+  mean: 290.22822761535645
+  max: 560.985595703125
