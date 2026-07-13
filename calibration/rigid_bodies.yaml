@@ -1,4 +1,4 @@
-date: '2026-07-13T12:36:04'
+date: '2026-07-13T14:37:47'
 note: marker positions relative to each body pivot, ROS axes (x,y,z)_ros = (x,-z,y)_motive
 bodies:
   popillia:
@@ -52,3 +52,8 @@ bodies:
       - 0.04676023870706558
       - -0.01144803874194622
       - -0.0420154333114624
+    - name: marker_6
+      position_m:
+      - -0.0006168968975543976
+      - -0.030016526579856873
+      - 0.07190124690532684

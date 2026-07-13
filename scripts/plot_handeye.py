@@ -279,6 +279,23 @@ def main():
     else:
         print(f'NOTE: {eth_path} not found — run calibrate-handeye-eth to '
               'include the ETH solver in the plot')
+
+    # physical ground truth (marker ball on the lens, scripts/lens_ground_truth.py)
+    gt_path = 'calibration/lens_ground_truth.yaml'
+    if os.path.exists(gt_path):
+        with open(gt_path) as f:
+            gt = yaml.safe_load(f)
+        t = np.array(gt['lens_position_m']) * 1000
+        fig.add_trace(go.Scatter3d(
+            x=[t[0]], y=[t[1]], z=[t[2]], mode='markers',
+            marker=dict(size=11, color='#111111', symbol='x'),
+            name=f'GROUND TRUTH (lens ball)  ({t[0]:.0f},{t[1]:.0f},{t[2]:.0f}) mm',
+            hovertemplate=('physical ground truth<br>'
+                           f'±{gt["sigma_mm"]["lateral"]:.0f} mm lateral, '
+                           f'±{gt["sigma_mm"]["axial"]:.0f} mm axial'
+                           '<br>x=%{x:.1f} y=%{y:.1f} z=%{z:.1f} mm'
+                           '<extra></extra>')))
+        print(f'ground truth included from {gt_path}')
     look = R_x @ np.array([0, 0, 1.0])         # camera optical axis (cam +z)
     tip = t_x * 1000 + look * ax_len * 0.6
     fig.add_trace(go.Scatter3d(
