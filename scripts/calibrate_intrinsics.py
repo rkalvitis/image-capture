@@ -210,7 +210,9 @@ def main():
                     help='marker size; default scales the nominal 6/8 ratio '
                          'by the measured square size')
     ap.add_argument('--dict', default=DEFAULT_BOARD['dictionary'])
-    ap.add_argument('--out', default='calibration/intrinsics.yaml')
+    ap.add_argument('--out', default=None,
+                    help='output YAML; default: calibration/<run>/intrinsics.yaml '
+                         'plus a "latest" copy at calibration/intrinsics.yaml')
     ap.add_argument('--min-corners', type=int, default=12)
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
@@ -243,7 +245,16 @@ def main():
     print(f'distortion: {np.round(res["dist"].ravel(), 5).tolist()}')
     worst = sorted(zip(res['per_view'], res['used']))[-3:]
     print('worst views: ' + ', '.join(f'{n} ({e:.2f} px)' for e, n in worst))
-    save_yaml(res, board_spec, args.out, source=args.images)
+    if args.out:
+        outs = [args.out]
+    else:
+        base = os.path.basename(os.path.normpath(args.images))
+        run = (os.path.basename(os.path.dirname(os.path.normpath(args.images)))
+               if base == 'photos' else base)
+        outs = [f'calibration/{run}/intrinsics.yaml',
+                'calibration/intrinsics.yaml']       # <- "latest" pointer
+    for out in outs:
+        save_yaml(res, board_spec, out, source=args.images)
 
 
 if __name__ == '__main__':

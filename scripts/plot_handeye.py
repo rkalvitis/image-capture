@@ -163,7 +163,9 @@ def main():
                     help='which solver anchors the sketch/look direction '
                          '(default: the method stored in calibration/'
                          'hand_eye.yaml, else PARK)')
-    ap.add_argument('--out', default='calibration/hand_eye_view.html')
+    ap.add_argument('--out', default=None,
+                    help='output HTML; default: '
+                         'calibration/<session>/hand_eye_view.html')
     ap.add_argument('--no-open', action='store_true',
                     help="don't open the result in the browser")
     args = ap.parse_args()
@@ -311,11 +313,14 @@ def main():
         template='plotly_white', height=750,
         legend=dict(orientation='h', yanchor='bottom', y=1.02))
 
-    os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
-    fig.write_html(args.out, include_plotlyjs=True)
-    print(f'wrote {args.out}')
+    out = args.out or (f'calibration/'
+                       f'{os.path.basename(args.session.rstrip("/"))}/'
+                       f'hand_eye_view.html')
+    os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
+    fig.write_html(out, include_plotlyjs=True)
+    print(f'wrote {out}')
     if not args.no_open:
-        webbrowser.open('file://' + os.path.abspath(args.out))
+        webbrowser.open('file://' + os.path.abspath(out))
 
 
 if __name__ == '__main__':

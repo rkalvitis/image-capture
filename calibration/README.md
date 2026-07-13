@@ -1,4 +1,33 @@
-# Calibration boards — print sheet
+# Calibration
+
+## Session folders (one per calibration experiment)
+
+Every calibration run is **self-contained** under `calibration/<session>/`:
+
+```
+calibration/phone_<YYYYMMDD_HHMMSS>/
+  bag/                 rosbag from `pixi run record-poses` (moved here)
+  photos/*.DNG         the board shots
+  clock/*.DNG          clock photos (if taken)
+  intrinsics.yaml      calibrate-intrinsics output
+  hand_eye.yaml        calibrate-handeye output
+  hand_eye_view.html   plot_handeye output
+```
+
+The scripts accept the session folder directly and find bag/photos inside:
+
+```bash
+pixi run calibrate-intrinsics -- calibration/<session>/photos  <board flags>
+pixi run calibrate-handeye    -- calibration/<session>  [--clock-shows …]
+pixi run -- python scripts/plot_handeye.py calibration/<session>
+```
+
+`calibration/intrinsics.yaml` and `calibration/hand_eye.yaml` at the root
+are the **"latest" copies** (updated on every default-output run) — that's
+what downstream tools read by default. Photos, bags and HTML views are
+gitignored (large / regenerable); the YAML results are version-controlled.
+
+## Calibration boards — print sheet
 
 Five sizes, print them all once (100 % scale / "actual size", never
 "fit to page"; laser or photo-quality print — check the small markers are

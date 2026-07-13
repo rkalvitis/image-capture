@@ -49,6 +49,9 @@ nbformat = ">=4.2"
 # camera calibration (scripts/make_charuco_board.py, calibrate_intrinsics.py,
 # calibrate_handeye.py) — conda-forge build includes the aruco module.
 opencv = ">=4.8"
+# required by the vendored ETH-ASL hand_eye_calibration solver
+# (scripts/calibrate_handeye_eth.py; clone noted in that script's docstring)
+matplotlib = "*"
 
 [feature.optitrack.pypi-dependencies]
 # natnet_py: Jerome Guzzi's pure-Python NatNet client. Editable install from
@@ -145,6 +148,10 @@ cmd = "python scripts/calibrate_intrinsics.py"
 [tasks.calibrate-handeye]
 description = "Hand-eye (phone body -> lens) from a handheld board session. Usage: pixi run calibrate-handeye -- datasets/phone_<ts> [--clock-shows HH:MM:SS.mmm ...]"
 cmd = "python scripts/calibrate_handeye.py"
+
+[tasks.calibrate-handeye-eth]
+description = "Hand-eye via the ETH-ASL dual-quaternion solver (2nd opinion; needs vendor/ clone, see script docstring). Usage: pixi run calibrate-handeye-eth -- calibration/phone_<ts>"
+cmd = "python scripts/calibrate_handeye_eth.py"
 
 [tasks.dump-bodies]
 description = "Dump every rigid body's marker constellation from Motive to calibration/rigid_bodies.yaml (run in the lab)."

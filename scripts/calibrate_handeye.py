@@ -164,12 +164,24 @@ def collect_pairs(session, intrinsics_path, rigid_body='phone',
         print('WARNING: no clock offset given — assuming NTP-synced clocks',
               file=sys.stderr)
 
-    track = load_pose_track(session, rigid_body)
+    # a self-contained calibration folder keeps its rosbag under <session>/bag
+    bag_dir = (os.path.join(session, 'bag')
+               if os.path.isdir(os.path.join(session, 'bag')) else session)
+    track = load_pose_track(bag_dir, rigid_body)
 
-    photos = sorted(glob(os.path.join(session, 'photos', '*.dng')) +
-                    glob(os.path.join(session, 'photos', '*.DNG')))
+    # calibration sessions keep their photos self-contained under
+    # calibration/<session>/photos/; fall back to <session>/photos/
+    photos = []
+    for d in (os.path.join('calibration', os.path.basename(session), 'photos'),
+              os.path.join(session, 'photos')):
+        photos = sorted(glob(os.path.join(d, '*.dng')) +
+                        glob(os.path.join(d, '*.DNG')))
+        if photos:
+            print(f'photos: {d} ({len(photos)})')
+            break
     if not photos:
-        raise SystemExit(f'no DNGs in {session}/photos/')
+        raise SystemExit(f'no DNGs in calibration/{os.path.basename(session)}'
+                         f'/photos/ or {session}/photos/')
 
     R_g2b, t_g2b, R_t2c, t_t2c = [], [], [], []
     img_pts, obj_pts, used, branches = [], [], [], []
@@ -281,7 +293,10 @@ def main():
     ap.add_argument('--method', default='PARK', choices=sorted(METHODS),
                     help='which solver result to store (default PARK; all '
                          'five are reported for comparison)')
-    ap.add_argument('--out', default='calibration/hand_eye.yaml')
+    ap.add_argument('--out', default=None,
+                    help='output YAML; default: calibration/<session>/'
+                         'hand_eye.yaml plus a "latest" copy at '
+                         'calibration/hand_eye.yaml')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
 
@@ -352,26 +367,34 @@ def main():
     print(f'reprojection via mocap + hand-eye: mean {np.mean(errs):.2f} px, '
           f'max {np.max(errs):.2f} px')
 
-    os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
-    with open(args.out, 'w') as f:
-        yaml.safe_dump({
-            'date': datetime.now().isoformat(timespec='seconds'),
-            'session': session,
-            'rigid_body': args.rigid_body,
-            'intrinsics_file': args.intrinsics,
-            'camera_in_body': {
-                'translation_m': [float(v) for v in t_ref],
-                'quaternion_xyzw': [float(v) for v in R_to_quat(R_ref)],
-            },
-            'method': args.method,
-            'n_photos': n,
-            'max_relative_rotation_deg': float(max_rel),
-            'method_agreement': {'rot_deg': float(spread_rot),
-                                 'trans_mm': float(spread_tr)},
-            'reprojection_px': {'mean': float(np.mean(errs)),
-                                'max': float(np.max(errs))},
-        }, f, sort_keys=False)
-    print(f'\nwrote {args.out}')
+    data = {
+        'date': datetime.now().isoformat(timespec='seconds'),
+        'session': session,
+        'rigid_body': args.rigid_body,
+        'intrinsics_file': args.intrinsics,
+        'camera_in_body': {
+            'translation_m': [float(v) for v in t_ref],
+            'quaternion_xyzw': [float(v) for v in R_to_quat(R_ref)],
+        },
+        'method': args.method,
+        'n_photos': n,
+        'max_relative_rotation_deg': float(max_rel),
+        'method_agreement': {'rot_deg': float(spread_rot),
+                             'trans_mm': float(spread_tr)},
+        'reprojection_px': {'mean': float(np.mean(errs)),
+                            'max': float(np.max(errs))},
+    }
+    if args.out:
+        outs = [args.out]
+    else:
+        outs = [f'calibration/{os.path.basename(session)}/hand_eye.yaml',
+                'calibration/hand_eye.yaml']         # <- "latest" pointer
+    print()
+    for out in outs:
+        os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
+        with open(out, 'w') as f:
+            yaml.safe_dump(data, f, sort_keys=False)
+        print(f'wrote {out}')
 
 
 if __name__ == '__main__':
