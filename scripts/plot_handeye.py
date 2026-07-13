@@ -44,8 +44,14 @@ AXIS_COLORS = {'x': '#e34948', 'y': '#1baf7a', 'z': '#2a78d6'}
 # at the projected lens position. Lens placement on the body is approximate.
 PHONE_L, PHONE_W, PHONE_T = 146.6, 70.6, 8.25
 PHONE_R = 12.0                                 # body corner radius
-LENS_FROM_TOP, LENS_FROM_EDGE = 30.0, 13.0     # ultra-wide (lower-left lens)
-CAM_BOX = dict(a0=-22.0, a1=14.5, b0=-7.0, b1=29.5, r=9.0, bump=4.2)
+# The sketch is anchored at the ULTRA-WIDE lens (the camera used, per EXIF):
+# the lower-left lens of the module, ~35 mm from the top edge, ~14 mm from
+# the side. All module/lens offsets below are relative to it (a = toward
+# the phone bottom, b = away from the near side edge).
+LENS_FROM_TOP, LENS_FROM_EDGE = 35.0, 14.0
+CAM_BOX = dict(a0=-26.0, a1=10.5, b0=-8.0, b1=28.5, r=9.0, bump=4.2)
+LENS_R = 7.5
+OTHER_LENSES = ((-19.0, 0.0), (-9.5, 19.0))    # main (wide), telephoto
 PHONE_PLANE_MARKERS = ('marker_2', 'marker_3', 'marker_4')
 
 
@@ -60,6 +66,13 @@ def _rounded_rect(a0, a1, b0, b1, r, n=6):
             pts.append((ca + r * math.cos(ang), cb + r * math.sin(ang)))
     pts.append(pts[0])
     return pts
+
+
+def _circle(ca, cb, r, n=24):
+    """Closed (a, b) outline of a circle."""
+    import math
+    return [(ca + r * math.cos(2 * math.pi * k / n),
+             cb + r * math.sin(2 * math.pi * k / n)) for k in range(n + 1)]
 
 
 def _phone_sketch(origin, u, v, nvec, side):
@@ -77,13 +90,16 @@ def _phone_sketch(origin, u, v, nvec, side):
     body = _rounded_rect(a0, a1, b0, b1, PHONE_R)
     cam = _rounded_rect(CAM_BOX['a0'], CAM_BOX['a1'],
                         CAM_BOX['b0'], CAM_BOX['b1'], CAM_BOX['r'])
+    face = -side * CAM_BOX['bump']                          # module outer face
     paths = [
         [to3(a, b, 0.0) for a, b in body],                  # back face
         [to3(a, b, side * PHONE_T) for a, b in body],       # front face
         [to3(a, b, 0.0) for a, b in cam],                   # camera module
-        [to3(a, b, -side * CAM_BOX['bump']) for a, b in cam],  # module top
+        [to3(a, b, face) for a, b in cam],                  # module top
     ]
-    # connectors between the two body faces (at the four corner arcs)
+    for ca, cb in OTHER_LENSES:                             # main + telephoto
+        paths.append([to3(a, b, face) for a, b in _circle(ca, cb, LENS_R)])
+    # connectors between the two body faces (at the four side midpoints)
     for a, b in (( (a0 + a1) / 2, b0), ((a0 + a1) / 2, b1),
                  (a0, (b0 + b1) / 2), (a1, (b0 + b1) / 2)):
         paths.append([to3(a, b, 0.0), to3(a, b, side * PHONE_T)])
@@ -92,12 +108,17 @@ def _phone_sketch(origin, u, v, nvec, side):
         for p in path:
             xs.append(p[0]); ys.append(p[1]); zs.append(p[2])
         xs.append(None); ys.append(None); zs.append(None)
-    return xs, ys, zs
+    # ultra-wide lens circle separately: centered on the anchor = the
+    # solved camera position, so the match is visible in the plot
+    uw = [to3(a, b, face) for a, b in _circle(0.0, 0.0, LENS_R)]
+    uw_xyz = ([p[0] for p in uw], [p[1] for p in uw], [p[2] for p in uw])
+    return (xs, ys, zs), uw_xyz
 
 
 def phone_wireframe(R_x, t_x):
     """Fallback sketch in the camera frame (no marker plane available), mm."""
-    return _phone_sketch(t_x, R_x[:, 0], R_x[:, 1], R_x[:, 2], side=-1.0)
+    sketch, uw = _phone_sketch(t_x, R_x[:, 0], R_x[:, 1], R_x[:, 2], side=-1.0)
+    return sketch, uw
 
 
 def phone_wireframe_on_plane(R_x, t_x, marker_pos):
@@ -116,7 +137,8 @@ def phone_wireframe_on_plane(R_x, t_x, marker_pos):
     u = R_x[:, 0] - np.dot(R_x[:, 0], n) * n    # camera x projected in-plane
     u /= np.linalg.norm(u)
     v = np.cross(n, u)
-    return _phone_sketch(anchor, u, v, n, side), d_lens
+    sketch, uw = _phone_sketch(anchor, u, v, n, side)
+    return sketch, uw, d_lens
 
 
 def main():
@@ -242,17 +264,22 @@ def main():
     # schematic iPhone outline — seated on the marker-2/3/4 plate plane when
     # the constellation is known; camera-frame fallback otherwise
     if marker_pos and all(k in marker_pos for k in PHONE_PLANE_MARKERS):
-        (xs, ys, zs), d_lens = phone_wireframe_on_plane(R_x, t_x, marker_pos)
+        (xs, ys, zs), uw, d_lens = phone_wireframe_on_plane(R_x, t_x, marker_pos)
         print(f'solved lens vs marker-2/3/4 plate plane: {d_lens * 1000:+.1f} mm '
               '(physically expect a few mm — larger = hand-eye translation error)')
         sketch_name = 'iPhone 15 Pro (on m2/m3/m4 plane, approx.)'
     else:
-        xs, ys, zs = phone_wireframe(R_x, t_x)
+        (xs, ys, zs), uw = phone_wireframe(R_x, t_x)
         sketch_name = 'iPhone 15 Pro (schematic, approx.)'
     fig.add_trace(go.Scatter3d(
         x=xs, y=ys, z=zs, mode='lines',
         line=dict(color='#8a8781', width=3),
         name=sketch_name, hoverinfo='skip'))
+    fig.add_trace(go.Scatter3d(
+        x=uw[0], y=uw[1], z=uw[2], mode='lines',
+        line=dict(color='#2a78d6', width=5),
+        name='ultra-wide lens (anchored at solved camera)',
+        hoverinfo='skip'))
 
     fig.update_layout(
         title=f'Camera in the phone rigid-body frame — {args.session}',
