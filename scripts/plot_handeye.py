@@ -35,37 +35,69 @@ from calibrate_handeye import (collect_pairs, solve_all_methods, R_to_quat,
 CAT = ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7']
 AXIS_COLORS = {'x': '#e34948', 'y': '#1baf7a', 'z': '#2a78d6'}
 
-# iPhone 15 Pro schematic (mm): body 146.6 x 70.6 x 8.25. Physical setup
-# (2026-07-13): the phone rests flat on the plate whose plane is defined by
-# markers 2/3/4 of the `phone` body — the sketch is seated on that plane
-# when the marker file is available, anchored in-plane at the projected
-# lens position (lens placement on the body remains approximate).
+# iPhone 15 Pro schematic (mm): body 146.6 x 70.6 x 8.25 with ~12 mm
+# rounded corners; camera module ~36.5 mm rounded square, ~4.2 mm proud of
+# the back, in the top-left corner (ultra-wide lens = its lower-left spot).
+# Physical setup (2026-07-13): the phone rests flat on the plate whose
+# plane is defined by markers 2/3/4 of the `phone` body — the sketch is
+# seated on that plane when the marker file is available, anchored in-plane
+# at the projected lens position. Lens placement on the body is approximate.
 PHONE_L, PHONE_W, PHONE_T = 146.6, 70.6, 8.25
-LENS_FROM_TOP, LENS_FROM_EDGE = 20.0, 13.0
+PHONE_R = 12.0                                 # body corner radius
+LENS_FROM_TOP, LENS_FROM_EDGE = 30.0, 13.0     # ultra-wide (lower-left lens)
+CAM_BOX = dict(a0=-22.0, a1=14.5, b0=-7.0, b1=29.5, r=9.0, bump=4.2)
 PHONE_PLANE_MARKERS = ('marker_2', 'marker_3', 'marker_4')
 
 
-def _box_edges(corners):
-    edges = [(0, 1), (2, 3), (4, 5), (6, 7),
-             (0, 2), (1, 3), (4, 6), (5, 7),
-             (0, 4), (1, 5), (2, 6), (3, 7)]
+def _rounded_rect(a0, a1, b0, b1, r, n=6):
+    """Closed (a, b) outline of a rounded rectangle."""
+    import math
+    pts = []
+    for ca, cb, start in ((a1 - r, b1 - r, 0), (a0 + r, b1 - r, 90),
+                          (a0 + r, b0 + r, 180), (a1 - r, b0 + r, 270)):
+        for k in range(n + 1):
+            ang = math.radians(start + 90 * k / n)
+            pts.append((ca + r * math.cos(ang), cb + r * math.sin(ang)))
+    pts.append(pts[0])
+    return pts
+
+
+def _phone_sketch(origin, u, v, nvec, side):
+    """Wireframe polylines (mm) of the schematic phone in an (u, v, n) frame.
+
+    origin = lens position; the back glass lies in the c=0 plane, the body
+    slab extends `side`·thickness along n, the camera module protrudes the
+    opposite way. Returns plotly xs/ys/zs with None separators.
+    """
+    def to3(a, b, c):
+        return (origin + (a * u + b * v + c * nvec) / 1000.0) * 1000
+
+    a0, a1 = -LENS_FROM_TOP, PHONE_L - LENS_FROM_TOP
+    b0, b1 = -LENS_FROM_EDGE, PHONE_W - LENS_FROM_EDGE
+    body = _rounded_rect(a0, a1, b0, b1, PHONE_R)
+    cam = _rounded_rect(CAM_BOX['a0'], CAM_BOX['a1'],
+                        CAM_BOX['b0'], CAM_BOX['b1'], CAM_BOX['r'])
+    paths = [
+        [to3(a, b, 0.0) for a, b in body],                  # back face
+        [to3(a, b, side * PHONE_T) for a, b in body],       # front face
+        [to3(a, b, 0.0) for a, b in cam],                   # camera module
+        [to3(a, b, -side * CAM_BOX['bump']) for a, b in cam],  # module top
+    ]
+    # connectors between the two body faces (at the four corner arcs)
+    for a, b in (( (a0 + a1) / 2, b0), ((a0 + a1) / 2, b1),
+                 (a0, (b0 + b1) / 2), (a1, (b0 + b1) / 2)):
+        paths.append([to3(a, b, 0.0), to3(a, b, side * PHONE_T)])
     xs, ys, zs = [], [], []
-    for a, b in edges:
-        xs += [corners[a, 0], corners[b, 0], None]
-        ys += [corners[a, 1], corners[b, 1], None]
-        zs += [corners[a, 2], corners[b, 2], None]
+    for path in paths:
+        for p in path:
+            xs.append(p[0]); ys.append(p[1]); zs.append(p[2])
+        xs.append(None); ys.append(None); zs.append(None)
     return xs, ys, zs
 
 
 def phone_wireframe(R_x, t_x):
     """Fallback sketch in the camera frame (no marker plane available), mm."""
-    x0, x1 = -LENS_FROM_TOP, PHONE_L - LENS_FROM_TOP
-    y0, y1 = -LENS_FROM_EDGE, PHONE_W - LENS_FROM_EDGE
-    z0, z1 = -PHONE_T, 0.0                      # back glass through the lens
-    corners_cam = np.array([[x, y, z] for x in (x0, x1)
-                            for y in (y0, y1) for z in (z0, z1)]) / 1000.0
-    corners = ((R_x @ corners_cam.T).T + t_x) * 1000
-    return _box_edges(corners)
+    return _phone_sketch(t_x, R_x[:, 0], R_x[:, 1], R_x[:, 2], side=-1.0)
 
 
 def phone_wireframe_on_plane(R_x, t_x, marker_pos):
@@ -84,12 +116,7 @@ def phone_wireframe_on_plane(R_x, t_x, marker_pos):
     u = R_x[:, 0] - np.dot(R_x[:, 0], n) * n    # camera x projected in-plane
     u /= np.linalg.norm(u)
     v = np.cross(n, u)
-    corners = []
-    for a in (-LENS_FROM_TOP, PHONE_L - LENS_FROM_TOP):
-        for b in (-LENS_FROM_EDGE, PHONE_W - LENS_FROM_EDGE):
-            for c in (0.0, side * PHONE_T):
-                corners.append(anchor + (a * u + b * v + c * n) / 1000.0)
-    return _box_edges(np.array(corners) * 1000), d_lens
+    return _phone_sketch(anchor, u, v, n, side), d_lens
 
 
 def main():
