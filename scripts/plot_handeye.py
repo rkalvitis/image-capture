@@ -45,13 +45,13 @@ AXIS_COLORS = {'x': '#e34948', 'y': '#1baf7a', 'z': '#2a78d6'}
 PHONE_L, PHONE_W, PHONE_T = 146.6, 70.6, 8.25
 PHONE_R = 12.0                                 # body corner radius
 # The sketch is anchored at the ULTRA-WIDE lens (the camera used, per EXIF):
-# the lower-left lens of the module, ~35 mm from the top edge, ~14 mm from
+# the UPPER-most lens of the module, ~17 mm from the top edge, ~14 mm from
 # the side. All module/lens offsets below are relative to it (a = toward
 # the phone bottom, b = away from the near side edge).
-LENS_FROM_TOP, LENS_FROM_EDGE = 35.0, 14.0
-CAM_BOX = dict(a0=-26.0, a1=10.5, b0=-8.0, b1=28.5, r=9.0, bump=4.2)
+LENS_FROM_TOP, LENS_FROM_EDGE = 17.0, 14.0
+CAM_BOX = dict(a0=-8.0, a1=28.5, b0=-8.0, b1=28.5, r=9.0, bump=4.2)
 LENS_R = 7.5
-OTHER_LENSES = ((-19.0, 0.0), (-9.5, 19.0))    # main (wide), telephoto
+OTHER_LENSES = ((19.0, 0.0), (9.5, 19.0))      # main (wide), telephoto
 PHONE_PLANE_MARKERS = ('marker_2', 'marker_3', 'marker_4')
 
 
