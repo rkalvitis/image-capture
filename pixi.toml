@@ -46,6 +46,9 @@ pillow = ">=10"
 plotly = "*"
 ipykernel = "*"
 nbformat = ">=4.2"
+# camera calibration (scripts/make_charuco_board.py, calibrate_intrinsics.py,
+# calibrate_handeye.py) — conda-forge build includes the aruco module.
+opencv = ">=4.8"
 
 [feature.optitrack.pypi-dependencies]
 # natnet_py: Jerome Guzzi's pure-Python NatNet client. Editable install from
@@ -88,7 +91,11 @@ ROS_LOCALHOST_ONLY = "1"
 #   pixi run ms-clock           — millisecond clock display for the session
 #                                 clock photo
 #   pixi run match -- <session> — match photos/*.dng to poses → frames.csv
+#   pixi run make-board         — print-ready ChArUco calibration board PNG
+#   pixi run calibrate-intrinsics -- <folder> --square-mm <measured>
+#   pixi run calibrate-handeye  -- <session> [--clock-shows …]
 #   pixi run rviz-optitrack     — launch RViz with saved config
+# Full dataset procedure: RECORD_DATASET.md
 # ──────────────────────────────────────────────────────────────────────────
 [tasks.patch-natnet]
 description = "(implementation detail of `build`) idempotent natnet_py upstream fix."
@@ -126,6 +133,18 @@ cmd = "python scripts/ms_clock.py"
 [tasks.match]
 description = "Match a session's photos to poses. Usage: pixi run match -- datasets/phone_<ts> --clock-shows HH:MM:SS.mmm [--rigid-body phone]"
 cmd = "python scripts/match_photos.py"
+
+[tasks.make-board]
+description = "Generate a print-ready ChArUco calibration board PNG (see --help for sizes)."
+cmd = "python scripts/make_charuco_board.py"
+
+[tasks.calibrate-intrinsics]
+description = "Camera intrinsics from board photos. Usage: pixi run calibrate-intrinsics -- <folder> --square-mm <caliper-measured>"
+cmd = "python scripts/calibrate_intrinsics.py"
+
+[tasks.calibrate-handeye]
+description = "Hand-eye (phone body -> lens) from a handheld board session. Usage: pixi run calibrate-handeye -- datasets/phone_<ts> [--clock-shows HH:MM:SS.mmm ...]"
+cmd = "python scripts/calibrate_handeye.py"
 
 [tasks.rviz-optitrack]
 description = "Launch RViz with the saved Optitrack config."

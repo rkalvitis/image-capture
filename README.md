@@ -47,6 +47,9 @@ That's the only command needed every session. Output once connected:
 
 ## Record an iPhone photo session
 
+> **Full procedure including calibration: [`RECORD_DATASET.md`](RECORD_DATASET.md).**
+> The section below is the quick per-session reference.
+
 The dataset pipeline (**turntable method**): the iPhone (rigid body
 **`phone`**) sits fixed on a stand while the insect (rigid body
 **`popillia`**) is rotated 360° in steps — ~20 photos per revolution — then
