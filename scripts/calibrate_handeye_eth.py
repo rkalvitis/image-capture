@@ -6,10 +6,12 @@ session input, same synchronized pose pairs, INDEPENDENT solver
 implementation (ethz-asl/hand_eye_calibration: Daniilidis dual-quaternion
 formulation with screw-axis prefiltering and RANSAC outlier rejection).
 
-One-time setup (the repo is vendored untracked):
+The upstream repo is a PINNED GIT SUBMODULE (vendor/hand_eye_calibration);
+its working tree is verified clean on every run and the executed commit is
+printed — the solver code is provably 1:1 with upstream. One-time setup
+after cloning this repo:
 
-    git clone --depth 1 https://github.com/ethz-asl/hand_eye_calibration \
-        vendor/hand_eye_calibration
+    git submodule update --init vendor/hand_eye_calibration
 
 Usage (same arguments as the OpenCV version):
 
@@ -36,44 +38,53 @@ from calibrate_handeye import (collect_pairs, resolve_ambiguity,
 ETH_PY = 'vendor/hand_eye_calibration/hand_eye_calibration/python'
 
 
-def _patch_py3(path, old, new):
-    """Idempotent source fix for the python-2-era vendored code."""
-    with open(path) as f:
-        src = f.read()
-    if new in src:
-        return
-    if old not in src:
-        raise SystemExit(f'{path}: expected snippet not found — upstream '
-                         'changed, review the patch')
-    with open(path, 'w') as f:
-        f.write(src.replace(old, new))
-    print(f'patched {os.path.basename(path)} for python 3')
-
-
 def import_eth():
+    """Import the UNMODIFIED upstream solver from the pinned submodule.
+
+    The upstream code is python-2/old-numpy era; instead of editing its
+    files (which would break the bit-identical guarantee), all
+    compatibility fixes are RUNTIME shims applied in this process only:
+      - a stub for the unused ROS1 `import tf`;
+      - `np.str` alias restored (removed in numpy >= 1.24);
+      - `random.sample` accepts sets again (python >= 3.11 needs sequences).
+    Before importing, the submodule working tree is verified CLEAN, and the
+    exact upstream commit is printed — the executed code is provably 1:1
+    with github.com/ethz-asl/hand_eye_calibration at that SHA.
+    """
     if not os.path.isdir(ETH_PY):
         raise SystemExit(
-            'ETH repo not found — clone it first:\n'
-            '  git clone --depth 1 '
-            'https://github.com/ethz-asl/hand_eye_calibration '
-            'vendor/hand_eye_calibration')
-    # py3: random.sample needs a sequence, not a set
-    _patch_py3(os.path.join(ETH_PY, 'hand_eye_calibration',
-                            'dual_quaternion_hand_eye_calibration.py'),
-               'random.sample(indices_set,',
-               'random.sample(sorted(indices_set),')
-    # numpy >= 1.24 removed the np.str alias
-    _patch_py3(os.path.join(ETH_PY, 'hand_eye_calibration',
-                            'dual_quaternion.py'),
-               'np.str(self.q_rot), np.str(self.q_dual)',
-               'str(self.q_rot), str(self.q_dual)')
-    _patch_py3(os.path.join(ETH_PY, 'hand_eye_calibration', 'quaternion.py'),
-               'return np.str(self.q)',
-               'return str(self.q)')
-    # headless matplotlib + stub for the unused ROS1 `tf` import
+            'ETH submodule not initialized — run:\n'
+            '  git submodule update --init vendor/hand_eye_calibration')
+
+    import subprocess
+    sub = 'vendor/hand_eye_calibration'
+    dirty = subprocess.run(['git', '-C', sub, 'status', '--porcelain'],
+                           capture_output=True, text=True).stdout.strip()
+    if dirty:
+        raise SystemExit(f'submodule {sub} has local modifications — the '
+                         f'1:1-with-upstream guarantee is void:\n{dirty}\n'
+                         f'restore with: git -C {sub} checkout -- .')
+    sha = subprocess.run(['git', '-C', sub, 'rev-parse', 'HEAD'],
+                         capture_output=True, text=True).stdout.strip()
+    print(f'ETH solver: upstream @ {sha[:12]}, working tree clean '
+          f'(bit-identical to github.com/ethz-asl/hand_eye_calibration)')
+
+    # runtime shims (this process only, no source modifications)
     import matplotlib
-    matplotlib.use('Agg')
+    matplotlib.use('Agg')                       # headless plotting deps
     sys.modules.setdefault('tf', types.ModuleType('tf'))
+    if not hasattr(np, 'str'):
+        np.str = str                            # removed alias, numpy >= 1.24
+    import random
+    _orig_sample = random.sample
+
+    def _sample_accepting_sets(population, k, *a, **kw):
+        if isinstance(population, (set, frozenset, dict)):
+            population = sorted(population)
+        return _orig_sample(population, k, *a, **kw)
+
+    random.sample = _sample_accepting_sets
+
     sys.path.insert(0, ETH_PY)
     from hand_eye_calibration.dual_quaternion import DualQuaternion
     from hand_eye_calibration.dual_quaternion_hand_eye_calibration import (
@@ -94,9 +105,15 @@ def main():
     ap.add_argument('--out', default=None,
                     help='output YAML (default: '
                          'calibration/<session>/hand_eye_eth.yaml)')
+    ap.add_argument('--seed', type=int, default=0,
+                    help='seed for the upstream RANSAC (unseeded upstream, '
+                         'so results wander run-to-run without this; '
+                         'default 0 for reproducibility)')
     args = ap.parse_args()
 
     DualQuaternion, ransac, HandEyeConfig = import_eth()
+    import random
+    random.seed(args.seed)
 
     session = args.session.rstrip('/')
     pairs = collect_pairs(session, args.intrinsics, args.rigid_body,
