@@ -1,0 +1,3 @@
+numpy
+pyyaml
+pymobiledevice3      # USB tunnel + file pull (real phone only)

@@ -1,0 +1,26 @@
+# Capture session plan — copy to plan.yaml and edit.
+name: ring_v1
+turntable_steps: 36          # manual 10° steps (indexed platter)
+turntable_step_deg: 10.0
+turntable_yaw_tol_deg: 0.5
+poses: 9                     # robot poses per run — must match manual_poses.csv on the robot PC
+lens_position: [0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45]   # per pose 1..N (decide beforehand)
+frames_per_stop: 40          # focus stack: 40 frames per stop from focus_stack_start to focus_stack_end
+focus_stack_start: 0.0       # lens position (0 = nearest)
+focus_stack_end: 0.5         # ~78 s per stop at 1.95 s/frame; 1 = single frame at lens_position[k]
+settle_ms: 300
+exposure_mode: locked        # auto (continuous) | locked (meter once at hello, then hold for the session) | custom
+exposure_duration_s: 0.01    # custom only (1/100 s, last session's values)
+exposure_iso: 64             # custom only
+wb: {mode: locked}           # auto | locked | custom -> {mode: custom, temperature_k: 5000, tint: 0}
+still_window_s: 1.0          # to be tuned by experiment — measured jitter is printed at every stop
+still_phone_mm: 0.1
+still_popillia_mm: 0.1
+still_timeout_s: 15.0
+max_retries: 2
+phone_host: 127.0.0.1        # via the USB tunnel
+phone_port: 5601
+phone_bundle_id: ch.idsia.capture
+robot_host: 192.168.201.10   # the robot PC on the lab LAN — SET THIS
+robot_port: 5600
+output_root: /Users/robertskalvitis/Documents/repos/optitrack/datasets

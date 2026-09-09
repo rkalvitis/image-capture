@@ -1,0 +1,115 @@
+--- /Users/robertskalvitis/Documents/repos/robo_arm/panda_manual_poses.py	2026-08-31 11:06:07
++++ panda_manual_poses.py	2026-09-08 09:55:59
+@@ -32,6 +32,11 @@
+ 
+ RUN MODE (default) - the arm steps through the recorded poses:
+ 
++  _confirm_via:=socket [_confirm_port:=5600] replaces every Enter of
++  the run with a reached/go exchange with the Mac capture coordinator
++  (see confirm_socket.py); one run = one turntable step, repeat with
++  run_cycles.sh. Default keyboard = unchanged behaviour.
++
+     rosrun panda_moveit_ctrl panda_manual_poses.py _execute:=true
+ 
+   1. attaches the phone holder as collision geometry;
+@@ -76,6 +81,7 @@
+ from moveit_msgs.srv import GetStateValidity
+ 
+ import panda_semicircle_motion as arc
++import confirm_socket
+ 
+ # Only present on the robot PC (franka_ros); record-mode motion
+ # uses it to clear the monitored-stop state the robot enters when
+@@ -764,6 +770,14 @@
+     confirm_each_pose = get_param_once(
+         "~confirm_each_pose", arc.CONFIRM_EACH_POSE
+     )
++
++    # _confirm_via:=socket replaces every "press Enter" of the run with
++    # a reached/go exchange with the Mac coordinator (confirm_socket.py);
++    # implies _confirm_each_pose. Default 'keyboard' = unchanged.
++    confirm_via = str(get_param_once("~confirm_via", "keyboard")).strip().lower()
++    confirm_port = int(get_param_once("~confirm_port", 5600))
++    if confirm_via == "socket":
++        confirm_each_pose = True
+ 
+     # Initial pose: every run starts AND ends here (same file the
+     # arc script uses).
+@@ -892,7 +906,13 @@
+ 
+     total = len(poses)
+ 
++    if confirm_via == "socket":
++        confirm = confirm_socket.ConfirmServer(port=confirm_port, poses=total)
++    else:
++        confirm = confirm_socket.KeyboardConfirm(arc.wait_for_enter)
++
+     rospy.loginfo("Poses file: %s (%d poses)", poses_file, total)
++    rospy.loginfo("Confirmation: %s", confirm_via)
+     rospy.loginfo("Initial pose file: %s", joint_file)
+     rospy.loginfo("Execution enabled: %s", execute_motion)
+     rospy.loginfo(
+@@ -1046,12 +1066,18 @@
+     )
+ 
+     # Object placement/check moment, always confirmed.
+-    arc.wait_for_enter(
+-        "Robot at the initial pose, %d recorded poses ready. "
+-        "Place/check the object at the logged position and the "
+-        "framing on the phone, clear the workspace, then confirm "
+-        "to start." % total
+-    )
++    if not confirm.wait(
++            0, current_joints(move_group),
++            "Robot at the initial pose, %d recorded poses ready. "
++            "Place/check the object at the logged position and the "
++            "framing on the phone, clear the workspace, then confirm "
++            "to start." % total):
++        rospy.logwarn("Run aborted by the coordinator at the initial pose.")
++        confirm.done()
++        confirm.close()
++        move_group.stop()
++        moveit_commander.roscpp_shutdown()
++        return 1
+ 
+     mark_event("init_confirmed", 0)
+ 
+@@ -1125,10 +1151,14 @@
+ 
+         if index < total:
+             if confirm_each_pose:
+-                arc.wait_for_enter(
+-                    "Pose %d/%d done - take the photo, then "
+-                    "confirm to move on." % (index, total)
+-                )
++                if not confirm.wait(
++                        index, joints,
++                        "Pose %d/%d done - take the photo, then "
++                        "confirm to move on." % (index, total)):
++                    rospy.logwarn("Run aborted by the coordinator.")
++                    mark_event("pose_left", index)
++                    aborted = True
++                    break
+             else:
+                 rospy.loginfo(
+                     "Waiting %.2f s before the next pose...",
+@@ -1152,7 +1182,8 @@
+ 
+         if not aborted and reached_poses:
+             if confirm_each_pose:
+-                arc.wait_for_enter(
++                confirm.wait(
++                    total, reached_poses[-1],
+                     "Last pose done - take the final photo, then "
+                     "confirm to return to the initial pose."
+                 )
+@@ -1177,6 +1208,9 @@
+ 
+         mark_event("run_end")
+ 
++    confirm.done()
++    confirm.close()
++
+     move_group.stop()
+     move_group.clear_pose_targets()
+     moveit_commander.roscpp_shutdown()

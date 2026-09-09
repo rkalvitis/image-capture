@@ -1,0 +1,37 @@
+# XcodeGen spec — generate the Xcode project with:  brew install xcodegen && cd app && xcodegen generate
+name: CaptureApp
+options:
+  bundleIdPrefix: ch.idsia
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "15.0"
+targets:
+  CaptureApp:
+    type: application
+    platform: iOS
+    sources: [CaptureApp]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ch.idsia.capture
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 4QBP63RP9N
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+    info:
+      path: CaptureApp/Info.plist
+      properties:
+        CFBundleDisplayName: Capture
+        NSCameraUsageDescription: "Takes the dataset photos on command from the Mac."
+        NSLocalNetworkUsageDescription: "Receives shoot commands from the Mac coordinator."
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UILaunchScreen: {}          # REQUIRED: without it iOS runs the app letterboxed at 320x480 pt
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
