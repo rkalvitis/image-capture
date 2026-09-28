@@ -47,6 +47,5 @@ ip -4 -o addr show 2>/dev/null | awk '{print "iface      : " $2 " " $4}'
 echo "motive ping: $(ping -c1 -W1 192.168.201.5 >/dev/null 2>&1 && echo reachable || echo 'no answer')"
 echo "multicast  : $(ip -o link show 2>/dev/null | grep -c MULTICAST) interfaces with MULTICAST"
 echo
-echo "=== robot side ==="
-echo "robo_arm   : $(ls -d ~/shared_ws 2>/dev/null || echo 'shared_ws not in HOME') ; panda script: $(find / -name panda_manual_poses.py -not -path '*/image-capture/*' 2>/dev/null | head -3 | paste -sd, - || echo none)"
-echo "python3 pkgs: $(python3 -c 'import yaml; print("pyyaml ok")' 2>&1) / $(python3 -c 'import numpy; print("numpy", numpy.__version__)' 2>&1)"
+echo "=== python3 packages ==="
+echo "$(python3 -c 'import yaml; print("pyyaml ok")' 2>&1) / $(python3 -c 'import numpy; print("numpy", numpy.__version__)' 2>&1)"
