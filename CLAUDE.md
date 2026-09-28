@@ -50,8 +50,13 @@ docs/               plan, protocol, decisions
   worker finds it from the `pymobiledevice3` shebang automatically).
 - Signing: free Apple ID, **personal team `4QBP63RP9N`** (the certificate
   string shows a different id — use 4QBP63RP9N), bundle id `ch.idsia.capture`.
-- Robot PC: separate machine on the lab LAN, ROS 1, NO access from here.
-  Its IP/port still to be filled into `coordinator/plan.yaml` (`robot_host`).
+- Robot PC (= the future one-computer host, probed 2026-09-28 with `tools/ubuntu_info.sh`):
+  leon-OptiPlex-7070, `ssh leon@192.168.201.158` (password; the Mac must be on the lab
+  switch via USB-Ethernet en6 192.168.201.245, the VPN does not route 192.168.201.0/24),
+  x86_64, Ubuntu 20.04.6, RT kernel 5.15.96-rt61, i9-9900 8 cores, 31 GB RAM, no NVIDIA,
+  51 GB free, system python 3.8 (pymobiledevice3 therefore lives in the pixi env on Linux),
+  no pixi yet, usbmuxd installed, ROS 1 noetic sourced in .bashrc, spd-say/espeak/paplay/
+  notify-send present, Motive PC reachable. The user runs every command there (Claude has no access).
 - Mocap: OptiTrack driver runs via the pixi env in `optitrack/` (this repo since
   2026-09-28; `cd optitrack && pixi run record-poses`), on the Mac or on the Ubuntu PC.
 
@@ -185,8 +190,10 @@ pose), `--mocap none` possible. `robot_host` still to be set.
   env, colcon build and `record-mock` bag from the new location. NOT yet run on the robot PC
   (no access from here): first step there is `bash tools/ubuntu_info.sh`.
 - **Mac stays the app build machine**: free Apple ID -> reinstall from Xcode every 7 days.
-- **Datasets** still in `~/Documents/repos/optitrack/datasets/` (git-ignored, 60 GB); the plan
-  files keep those absolute paths; on Ubuntu rsync them and edit `session_dir` etc.
+- **Datasets stay in `~/Documents/repos/optitrack/datasets/` on the Mac, NEVER moved or
+  rsynced** (user's rule, repeated 2026-09-28; also 60 GB > 51 GB free on the PC). The plan
+  files keep those absolute paths. On Ubuntu: read-only copies of the eight aug31
+  calibration YAMLs (e.g. `~/calib_aug31/`), new sessions into a new folder on the PC.
 
 ## STATE 2026-09-18 (superseded by 2026-09-28 for the repo layout; data facts still valid)
 

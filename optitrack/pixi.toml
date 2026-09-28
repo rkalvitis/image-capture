@@ -59,6 +59,12 @@ matplotlib = "*"
 natnet_py = { path = "src/natnet_py", editable = true }
 # Runtime dep of natnet_py — also pulled in transitively, listed here for clarity.
 netifaces = ">=0.11"
+# iPhone over USB on the Ubuntu robot PC (image-capture coordinator: tunnel, frame pull,
+# app launch). Linux only: the Mac uses the pipx install; Ubuntu 20.04's python 3.8 is
+# too old for pymobiledevice3 (needs >= 3.9), so it lives in this env there.
+[feature.optitrack.target.linux.pypi-dependencies]
+pymobiledevice3 = ">=11"
+
 # NB: optitrack_ros_py, optitrack_listener and the real optitrack_msgs package
 # are NOT listed here. They're ament ROS 2 packages; pip's editable install
 # would skip their data_files / message generation, so the ament_index would

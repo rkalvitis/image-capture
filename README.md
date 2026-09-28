@@ -74,33 +74,58 @@ code paths, 26 tests + dry run; not yet run on the robot PC — start with
 installing the iPhone app needs the Mac, and with the free Apple ID the app
 must be reinstalled from Xcode every 7 days (the profile expires).
 
-1. `git clone --recurse-submodules <this repo>` (or rsync it, submodules included).
-   Datasets are not in git: rsync `optitrack/datasets/` and `optitrack/calibration/*/photos|bag`
-   from the Mac to wherever you like, then set `session_dir` / `rig_transforms` /
-   `calibration_files` in the plan (paths accept `~` and `$VARS`, e.g. `$DATASETS/...`).
-2. `curl -fsSL https://pixi.sh/install.sh | bash`, then `cd optitrack && pixi install`
-   (pixi.lock has `linux-64` and `linux-aarch64` since 2026-09-28; the first
-   `pixi run record-poses` colcon-builds the workspace).
-3. iPhone over USB: `sudo apt install usbmuxd libimobiledevice-utils` (usbmuxd runs
-   as a service; `idevice_id -l` must show the phone after "Trust this computer"),
-   `pipx install pymobiledevice3`. The tunnel (`pymobiledevice3 usbmux forward`)
-   and the frame pull (house arrest) need no root.
+The robot PC as probed on 2026-09-28 (`tools/ubuntu_info.sh`): leon-OptiPlex-7070,
+x86_64, Ubuntu 20.04.6, RT kernel 5.15.96-rt61, i9-9900 (8 cores), 31 GB RAM, no
+NVIDIA GPU, **51 GB free** in /home, system python 3.8 (too old for
+pymobiledevice3), no pixi, usbmuxd installed (socket-activated), user in plugdev,
+spd-say/espeak/paplay/aplay/notify-send present, ROS 1 noetic sourced in
+`.bashrc`, lab NIC = USB-Ethernet `enx9cebe85dcb1d` 192.168.201.158, Motive PC
+reachable, docker0 present (harmless: ROS_LOCALHOST_ONLY=1 in the pixi env).
+
+1. Repo: from the Mac, `rsync -a --exclude .pixi --exclude build --exclude install
+   --exclude log --exclude datasets --exclude '__pycache__' ~/Documents/repos/image-capture
+   leon@192.168.201.158:~/` (the submodules travel with it; `.git` too, so the
+   branch is there). **The datasets folder `~/Documents/repos/optitrack/datasets/` on
+   the Mac is never moved or rsynced** (user's rule; it is also 60 GB > 51 GB free).
+   The only files a session reads from it are the aug31 calibration YAMLs named in
+   the plan (`rig_transforms`, `calibration_files`); put read-only COPIES of those
+   eight small files on the PC, e.g. into `~/calib_aug31/` (`scp` from the Mac), and
+   point the plan there: `rig_transforms`, `calibration_files` -> `~/calib_aug31/...`,
+   `session_dir` / `output_root` -> a new folder on the PC such as `~/sessions/<name>`
+   (paths accept `~` and `$VARS`). New sessions recorded on the PC stay there;
+   whether they are copied to the Mac afterwards is the user's decision.
+   Budget: a full 324-stop session leaves ~24 GB of 16-bit TIFF masters plus the
+   250-frame raw buffer (~6 GB) on the PC; the phone keeps the raw.
+2. `curl -fsSL https://pixi.sh/install.sh | bash` (then open a new shell), then
+   `cd ~/image-capture/optitrack && pixi install` (linux-64 is in pixi.lock; RoboStack
+   ROS 2 Humble, colcon, cmake, compilers all come from the env, ~10 min, ~5 GB).
+   `pixi run build` once (colcon), then `pixi run record-mock` for 10 s = the bag
+   pipeline works without hardware.
+3. iPhone over USB: `pymobiledevice3` is a Linux pypi dependency of the pixi env
+   (system python 3.8 cannot run it). usbmuxd is already installed; it starts by
+   udev when the phone is plugged in. Check: plug the phone, trust the computer,
+   `pixi run pymobiledevice3 usbmux list` shows it. Tunnel and frame pull need no
+   root; `tools/usb_tunnel.sh` finds the env's binary by itself.
 4. Launching the app without touching the phone (`launch_app: true`) needs the
-   developer tunnel on iOS 17+: `sudo pymobiledevice3 remote tunneld` in a
-   terminal for the whole session (the launcher then runs
-   `pymobiledevice3 developer dvt launch --kill-existing ch.idsia.capture`). Without
-   it the launcher prints one line and you tap the icon once before the session;
-   nothing else changes. `app_launch_cmd` in the plan overrides the command.
-5. Notifications: `sudo apt install speech-dispatcher espeak-ng libnotify-bin
-   pulseaudio-utils` (`spd-say`, `notify-send`, `paplay`; the notifier uses what
-   exists and switches itself off with one log line if no speech tool is found).
-6. ROS 1 on that PC: do not source its `setup.bash` in the coordinator's shell.
-   `tools/run_coordinator.sh` strips `/opt/ros/*` and `ROS_*` from the environment
-   if it finds them, so a sourced `.bashrc` is survivable, but keep the robot
-   script (ROS 1, `run_cycles.sh`) in its own terminal. `robot_host` becomes
-   `127.0.0.1`.
+   developer tunnel on iOS 17+, as root, in its own terminal for the whole session:
+   `sudo ~/image-capture/optitrack/.pixi/envs/default/bin/pymobiledevice3 remote tunneld`.
+   The launcher then runs `pymobiledevice3 developer dvt launch --kill-existing
+   ch.idsia.capture`. Without tunneld it prints one line and you tap the icon once
+   before the session; nothing else changes. `app_launch_cmd` in the plan overrides
+   the command.
+5. Notifications: everything needed is installed (spd-say, espeak, paplay,
+   notify-send). Run the coordinator from a terminal on the PC's desktop session,
+   not over plain ssh: `DISPLAY` and the session bus are unset over ssh, so the
+   banner and speech would be skipped (the sound still plays if PulseAudio is up).
+6. ROS 1 noetic is sourced in `.bashrc` (lines 122/140 and a realsense workspace).
+   `tools/run_coordinator.sh` strips `/opt/ros/*`, `*/devel/*` and `ROS_*` before
+   starting pixi, so no `.bashrc` change is needed; keep the robot script
+   (ROS 1, `run_cycles.sh`) in its own terminal. `robot_host: 127.0.0.1` in the plan.
 7. Run exactly as on the Mac: `bash tools/run_coordinator.sh --plan coordinator/plan.sep15.yaml`
-   (it starts tunnel, app, dump-bodies and the mocap bag itself).
+   (it starts tunnel, app, dump-bodies and the mocap bag itself). First a dry run:
+   `python3 tests/test_dry_run.py` inside `pixi run` (see "Dry run" below) and one
+   real stop with `plan.test1loop.yaml`. Merge speed on the i9 (no GPU is needed)
+   is unmeasured: watch the `merge` queue in the status line during the first stops.
 
 ## Building and installing the app (phone connected via USB-C)
 
