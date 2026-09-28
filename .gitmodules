@@ -1,0 +1,6 @@
+[submodule "optitrack/src/optitrack_msgs"]
+	path = optitrack/src/optitrack_msgs
+	url = https://github.com/jeguzzi/optitrack_msgs.git
+[submodule "optitrack/vendor/hand_eye_calibration"]
+	path = optitrack/vendor/hand_eye_calibration
+	url = https://github.com/ethz-asl/hand_eye_calibration

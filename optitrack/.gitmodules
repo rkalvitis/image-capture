@@ -1,6 +1,0 @@
-[submodule "src/optitrack_msgs"]
-	path = src/optitrack_msgs
-	url = git@github.com:jeguzzi/optitrack_msgs.git
-[submodule "vendor/hand_eye_calibration"]
-	path = vendor/hand_eye_calibration
-	url = https://github.com/ethz-asl/hand_eye_calibration
