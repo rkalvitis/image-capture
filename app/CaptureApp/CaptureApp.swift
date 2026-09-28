@@ -72,7 +72,17 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
     private func preview(sideways: Bool) -> some View {
+        if state.showPreview {
+            previewLive(sideways: sideways)
+        } else {
+            Color.black.frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(Text("preview off (ui preview: true)").font(.caption).foregroundStyle(.gray))
+        }
+    }
+
+    private func previewLive(sideways: Bool) -> some View {
         PreviewView(session: state.camera.session, videoAngle: videoAngle, fill: previewFill)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
@@ -124,6 +134,16 @@ struct ContentView: View {
                 Button(previewFill ? "Fit" : "Fill") { previewFill.toggle() }.buttonStyle(.bordered)
                 Button(horizontal ? "Vert" : "Horiz") { horizontal.toggle() }.buttonStyle(.bordered)
                 Button(showClips ? "Clips✓" : "Clips") { showClips.toggle() }.buttonStyle(.bordered)
+            }
+            .font(.system(size: 11))
+            .controlSize(.small)
+            // heat: 10 fps cap, preview off, dim screen — Eco = all three
+            HStack(spacing: 3) {
+                Button(state.ecoOn ? "Eco✓" : "Eco") { state.setEco(!state.ecoOn) }
+                    .buttonStyle(state.ecoOn ? .borderedProminent : .borderedProminent).tint(state.ecoOn ? .green : .gray)
+                Button(state.lowFps ? "10fps✓" : "10fps") { state.toggleFps() }.buttonStyle(.bordered)
+                Button(state.showPreview ? "Prev✓" : "Prev") { state.togglePreview() }.buttonStyle(.bordered)
+                Button(state.dimmed ? "Dim✓" : "Dim") { state.toggleDim() }.buttonStyle(.bordered)
             }
             .font(.system(size: 11))
             .controlSize(.small)

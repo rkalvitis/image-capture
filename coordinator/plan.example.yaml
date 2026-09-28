@@ -3,11 +3,26 @@ name: ring_v1
 turntable_steps: 36          # manual 10° steps (indexed platter)
 turntable_step_deg: 10.0
 turntable_yaw_tol_deg: 0.5
-poses: 9                     # robot poses per run — must match manual_poses.csv on the robot PC
-lens_position: [0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45]   # per pose 1..N (decide beforehand)
-frames_per_stop: 40          # focus stack: 40 frames per stop from focus_stack_start to focus_stack_end
-focus_stack_start: 0.0       # lens position (0 = nearest)
-focus_stack_end: 0.5         # ~78 s per stop at 1.95 s/frame; 1 = single frame at lens_position[k]
+poses: 8                     # rows of manual_poses.csv on the robot PC = aug31 poses 1,2,3,4,5,6,7,9 (pose 8 not used)
+shoot_initial_pose: true     # + a stack at the initial pose (joint_start.csv = aug31 pose 0) -> 9 stacks per run
+lens_position_initial: 0.3333   # init focus of the initial pose
+# focus_mode table: per stop the focus of the aug31 image with the same robot pose and the nearest popillia yaw
+# (the focus depends on the pose AND the insect's rotation). Built by
+#   python3 tools/focus_from_dataset.py <aug31 dataset> --pose-order 0,1,2,3,4,5,6,7,9 --yaml coordinator/focus_aug31.yaml
+focus_table: coordinator/focus_aug31.yaml
+# per pose 1..N: the stack centre for focus_mode pose, and the fallback when the table has no entry for a pose
+# (medians of the same dataset, poses 1,2,3,4,5,6,7,9; pose 0 = lens_position_initial)
+lens_position: [0.271, 0.357, 0.220, 0.153, 0.220, 0.341, 0.149, 0.241]
+frames_per_stop: 50          # focus stack frames per stop (1 = single frame at lens_position[k]); ~2 s per frame
+focus_mode: table            # table = frames_per_stop frames centred on the focus_table value for (pose, yaw);
+                             # pose = centred on lens_position[k]; auto = AF on the frame centre at every stop;
+                             # range = linspace(focus_stack_start, focus_stack_end, frames_per_stop).
+                             # Odd frame count -> the centre is the middle/reference frame.
+focus_stack_step: 0          # 0 = uniform grid focus_stack_start..focus_stack_end (50 frames -> step 0.0102) shifted by
+                             #     less than one step so that the init focus is EXACTLY one frame (= the merge reference);
+                             # >0 = centre ± (n-1)/2 steps instead
+focus_stack_start: 0.0       # 0 = nearest
+focus_stack_end: 0.5
 settle_ms: 300
 exposure_mode: locked        # auto (continuous) | locked (meter once at hello, then hold for the session) | custom
 exposure_duration_s: 0.01    # custom only (1/100 s, last session's values)
@@ -18,9 +33,23 @@ still_phone_mm: 0.1
 still_popillia_mm: 0.1
 still_timeout_s: 15.0
 max_retries: 2
+# phone heat reduction (the phone reaches thermal "serious" after ~30 rapid ProRAW frames)
+phone_raw: proraw            # proraw | bayer — bayer = sensor data only, no on-phone processing (demosaic on the Mac, rawpy)
+phone_quality: speed         # quality | balanced | speed — ProRAW processing effort
+phone_frame_rate: 10         # cap the preview + intrinsics frame rate (default 30)
+phone_screen_brightness: 0.05
+phone_preview: false         # no live preview during the session (ui {"preview": true} turns it back on)
 phone_host: 127.0.0.1        # via the USB tunnel
 phone_port: 5601
 phone_bundle_id: ch.idsia.capture
-robot_host: 192.168.201.10   # the robot PC on the lab LAN — SET THIS
+robot_host: 192.168.201.158   # the robot PC on the switch subnet 192.168.201.0/24 (Mac: en6 USB-Ethernet, 192.168.201.245)
 robot_port: 5600
 output_root: /Users/robertskalvitis/Documents/repos/optitrack/datasets
+# camera poses (T_insect<-cam = cam_x.. quat_xyzw in frames.csv) need the hand-eye transform;
+# leave empty to fill them later with colmap_export.py --rig
+rig_transforms: /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/rig_transforms.yaml
+# Stage 7 — merge each stack on the Mac while the session runs (background worker, ~65 s per 40-frame stop)
+merge_inline: true
+merge_ref_index: -1          # focus index used as the geometric reference at every stop (-1 = middle of the stack)
+merge_delete_raw: true       # after a verified merge delete that stop's DNGs from the MAC only (the phone keeps all)
+merge_python: ""             # interpreter with rawpy + opencv for the merge ("" = the coordinator's own, the pixi env)

@@ -151,6 +151,25 @@ class ConfirmServer(object):
             pass
 
 
+class AutoConfirm(object):
+    """Debug walk (_confirm_via:=none): no prompt, just a pause."""
+
+    def __init__(self, wait_s):
+        self._wait_s = float(wait_s)
+
+    def wait(self, pose_id, joints, message=""):
+        import rospy
+        rospy.loginfo("%s  (auto: continuing in %.1f s)", message, self._wait_s)
+        rospy.sleep(self._wait_s)
+        return not rospy.is_shutdown()
+
+    def done(self):
+        pass
+
+    def close(self):
+        pass
+
+
 class KeyboardConfirm(object):
     """Unchanged behaviour: press Enter (uses arc.wait_for_enter)."""
 

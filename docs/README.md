@@ -2,13 +2,16 @@
 
 Plan, protocol and decisions for the app + coordinator + robot handshake
 implemented in this repo (see the top-level README.md for the code layout
-and how to run it). Planning started 2026-09-03; v1 implemented 2026-09-08
-(app uncompiled until Xcode is available).
+and how to run it). Planning started 2026-09-03; v1 implemented and
+bench-tested 2026-09-08; merge, COLMAP export and the streaming merge
+(Stage 5/7) added 2026-09-09.
 
 | file | what it is |
 |---|---|
 | `DEVELOPMENT_PLAN.md` | Goals, architecture, staged build list with acceptance criteria, risks, open questions. Start here. |
 | `PROTOCOL.md` | The message contract between Mac coordinator, phone app and robot PC, plus the per-frame sidecar format. |
+| `DATASET_RUNBOOK.md` | The full dataset session of 2026-09-16 (`plan.sep15.yaml`): one command, the manual inputs, resume, what to watch, after the session. |
+| `MAIN_TEST_RUNBOOK.md` | The 2026-09-09 main test (9 stacks, no mocap) — done. |
 | `APP_BUILD_PROMPT.md` | Ready-to-use prompt for building v1 of the whole automation — app, Mac coordinator, robot/turntable handshake (single shot per stop, focus stacking deferred) — with the open development questions to answer first. |
 
 Related context in the optitrack repo (`~/Documents/repos/optitrack`):

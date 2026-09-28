@@ -13,8 +13,12 @@ import time
 
 
 class FakePhone:
-    def __init__(self, docs_dir, port=5601, fail_every=0, capture_s=0.15):
+    def __init__(self, docs_dir, port=5601, fail_every=0, capture_s=0.15, real_frames=False):
         self.docs_dir, self.port, self.fail_every, self.capture_s = docs_dir, port, fail_every, capture_s
+        self.synth = None
+        if real_frames:                       # synthetic PNG stacks (needs cv2) so the merge can run on them
+            from .synth import SyntheticStack
+            self.synth = SyntheticStack()
         self.session, self.lens, self.settle_ms = None, 0.5, 300
         self.n_stacks = 0
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -32,8 +36,17 @@ class FakePhone:
                 continue
             threading.Thread(target=self._client, args=(conn,), daemon=True).start()
 
+    def drop_clients(self):
+        """Simulate a pulled USB cable: close every client connection."""
+        for c in list(getattr(self, "_clients", [])):
+            try:
+                c.shutdown(socket.SHUT_RDWR); c.close()
+            except OSError:
+                pass
+
     def _client(self, conn):
         buf = b""
+        self._clients = getattr(self, "_clients", []) + [conn]
         def send(o): conn.sendall((json.dumps(o) + "\n").encode())
         try:
             while True:
@@ -56,8 +69,9 @@ class FakePhone:
                 elif t == "ping":
                     send({"type": "pong", "t": time.time()})
                 elif t == "focus":
-                    self.lens = float(m["lens_position"]); time.sleep(0.05)
-                    send({"type": "focus", "t": time.time(), "lens_position": self.lens})
+                    auto = m.get("lens_position") == "auto"
+                    self.lens = 0.3 if auto else float(m["lens_position"]); time.sleep(0.05)   # fake AF always finds 0.3
+                    send({"type": "focus", "t": time.time(), "lens_position": self.lens, "auto": auto})
                 elif t == "status":
                     send({"type": "status", "t": time.time(), "thermal": "nominal", "free_bytes": 50 << 30,
                           "battery": 0.9, "charging": True})
@@ -72,18 +86,24 @@ class FakePhone:
                         ct = time.time()
                         name = f"IMG_{self.session}_{int(m['id']):04d}_{k:02d}"
                         d = os.path.join(self.docs_dir, self.session)
-                        with open(os.path.join(d, name + ".dng"), "wb") as f:
-                            f.write(b"II*\x00" + os.urandom(4096))
-                        side = {"file": name + ".dng", "stop": m["id"], "pose": m.get("pose"), "step": m.get("step"),
+                        if self.synth:
+                            ext, data = ".png", self.synth.frame_png(self.lens)
+                            intr = self.synth.intrinsics(self.lens)
+                        else:
+                            ext, data = ".dng", b"II*\x00" + os.urandom(4096)
+                            intr = {"fx": 1976.0 - 300 * self.lens, "fy": 1971.0 - 300 * self.lens,
+                                    "cx": 2036.7, "cy": 1421.0, "w": 4032, "h": 3024}
+                        with open(os.path.join(d, name + ext), "wb") as f:
+                            f.write(data)
+                        side = {"file": name + ext, "stop": m["id"], "pose": m.get("pose"), "step": m.get("step"),
                                 "focus_index": k, "lens_position": self.lens, "capture_time": ct,
                                 "exposure": {"duration_s": 0.01, "iso": 64},
-                                "intrinsics": {"fx": 1976.0 - 300 * self.lens, "fy": 1971.0 - 300 * self.lens,
-                                               "cx": 2036.7, "cy": 1421.0, "w": 4032, "h": 3024},
+                                "intrinsics": intr,
                                 "calibration": None, "gdc_enabled": True, "orientation": 6,
                                 "device": "FakePhone", "lens": "ultra-wide", "thermal": "nominal"}
                         with open(os.path.join(d, name + ".json"), "w") as f:
                             json.dump(side, f)
-                        fr = {"k": k, "file": name + ".dng", "capture_time": ct, "lens_position": self.lens,
+                        fr = {"k": k, "file": name + ext, "capture_time": ct, "lens_position": self.lens,
                               "intrinsics": side["intrinsics"], "exposure": side["exposure"], "thermal": "nominal"}
                         send({"type": "frame", "id": m["id"], **fr})
                         frames.append(fr)
@@ -104,8 +124,9 @@ def main():
     ap.add_argument("--port", type=int, default=5601)
     ap.add_argument("--docs-dir", required=True)
     ap.add_argument("--fail-every", type=int, default=0)
+    ap.add_argument("--real-frames", action="store_true", help="write synthetic PNG stacks the merge can process (needs cv2)")
     a = ap.parse_args()
-    fp = FakePhone(a.docs_dir, a.port, a.fail_every)
+    fp = FakePhone(a.docs_dir, a.port, a.fail_every, real_frames=a.real_frames)
     print(f"[fake_phone] listening on 127.0.0.1:{a.port}, files -> {a.docs_dir}")
     try:
         while True:

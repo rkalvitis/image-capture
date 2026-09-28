@@ -1,0 +1,106 @@
+# ONE-LOOP TEST (2026-09-16 morning): identical to plan.sep15.yaml except turntable_steps 1 and its own folder.
+# 36 insect rotations x 9 robot poses = 324 stops, a 50-frame focus stack at each
+# (16 200 ProRAW frames), merged on the Mac during the session, raw frames deleted
+# from the Mac after every verified merge (the phone keeps all of them).
+#
+#   bash tools/run_coordinator.sh --plan coordinator/plan.sep15.yaml            # starts tunnel, app, mocap bag, dump-bodies
+#   bash tools/run_coordinator.sh --plan coordinator/plan.sep15.yaml --resume --start-step 12   # after a crash/abort
+#
+# Manual input during the session: Enter to start (insect placed), the EV of the
+# exposure check (once), Enter after every insect rotation (+ automatic yaw check),
+# Enter at the very end (stops the mocap recording / tunnel). Nothing at the robot poses.
+name: sep16_test_1loop
+session_dir: /Users/robertskalvitis/Documents/repos/optitrack/datasets/sep16_test_1loop
+output_root: /Users/robertskalvitis/Documents/repos/optitrack/datasets   # unused when session_dir is set
+
+# --- geometry of the session ------------------------------------------------
+turntable_steps: 1           # ONE rotation = 9 stacks (the final test before the dataset)
+turntable_step_deg: 10.0
+turntable_yaw_tol_deg: 0.5
+turntable_confirm: enter     # Enter after the manual rotation, NO yaw check (2026-09-16); the yaw is still logged per stop
+pose_confirm: false          # no Enter at the robot poses
+poses: 8                     # rows of the robot PC's manual_poses.csv (aug31 poses 1-7 + vertical)
+shoot_initial_pose: true     # + a stack at the initial pose (joint_start.csv = aug31 pose 0) -> 9 stacks per rotation
+lens_position_initial: 0.3333
+lens_position: [0.2510, 0.3412, 0.1961, 0.1020, 0.1569, 0.3098, 0.1608, 0.2392]   # fallback only (focus_mode table)
+focus_table: coordinator/focus_aug31.yaml
+focus_mode: table            # init focus = the aug31 image of the same robot pose at the nearest LIVE popillia yaw
+focus_table_yaw: null        # null = live yaw from the mocap (176.48 was the fixed value of the main test)
+frames_per_stop: 3           # TEST: 3 frames per pose (the dataset plan has 50)
+focus_stack_step: 0
+focus_stack_start: 0.0
+focus_stack_end: 0.5
+settle_ms: 300
+settle_after_move_s: 10.0    # 10 s idle after every arm move / insect turn before the first frame (the move swings the popillia)
+
+# --- exposure / colour --------------------------------------------------------
+exposure_mode: locked        # metered once at hello, then the exposure check below applies a CUSTOM exposure
+exposure_check: true         # step 0: one test frame, statistics, EV to apply (Enter = exposure_check_ev)
+exposure_check_ev: 1.5       # 2026-09-09 frames: beetle at 2 % linear, foam p99.9 at 0.43 -> +1.5 EV puts the beetle at sRGB ~0.28
+exposure_max_duration_s: 0.1 # shutter first (the rig is static), ISO only beyond 1/10 s
+wb: {mode: locked}
+
+# --- stillness gate (OptiTrack) --------------------------------------------------
+stillness_gate: false        # OFF (2026-09-16): popillia tracking noise at rest is 0.1-0.2 mm; jitter is logged, never blocks
+still_window_s: 1.0
+still_phone_mm: 0.1
+still_popillia_mm: 0.1
+still_timeout_s: 15.0
+max_retries: 2
+
+# --- phone (heat) ---------------------------------------------------------------
+phone_raw: proraw
+phone_quality: speed
+phone_frame_rate: 10
+phone_screen_brightness: 0.02
+phone_preview: false
+phone_host: 127.0.0.1
+phone_port: 5601
+phone_bundle_id: ch.idsia.capture
+phone_device_id: F69E5036-B4BE-5579-B8CD-DDC135DF373F
+
+# --- robot ------------------------------------------------------------------------
+robot_host: 192.168.201.158
+robot_port: 5600
+robot_start_cmd: ""          # e.g. "ssh leon@192.168.201.158 'cd /home/leon/shared_ws/SynthVLA && source devel/setup.bash && bash src/panda_moveit_ctrl/scripts/run_cycles.sh {cycles} _confirm_port:=5600'" (needs an ssh key); "" = start run_cycles.sh 36 on the robot PC by hand
+robot_files:
+  - robot/manual_poses.csv           # reference copy of the robot PC's 8 poses (aug31 poses 1-7 + vertical)
+  - robot/joint_start_aug31.csv      # the initial pose (= robot PC joint_start.csv, aug31 pose 0)
+
+# --- calibrations copied into <session>/calibrations/ ----------------------------
+rig_transforms: /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/rig_transforms.yaml
+calibration_files:
+  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/rig_transforms.yaml
+  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/handeye_robot.yaml
+  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/handeye_factoryK_20260831.yaml
+  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/handeye_sfm_refit.yaml
+  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/intrinsics_20260831.yaml
+  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/intrinsics_factory_20260831.yaml
+  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/rigid_bodies_20260831.yaml
+  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/insect_axis.yaml
+  - coordinator/focus_aug31.yaml
+
+# --- start / stop everything from this one command ---------------------------------
+start_tunnel: true           # pymobiledevice3 usbmux forward 5601
+launch_app: true             # xcrun devicectl ... launch ch.idsia.capture
+record_mocap: true           # pixi run record-poses -> <session>/mocap/bag_<ts>/ (driver + rosbag, bodies below)
+mocap_bodies: "phone popillia"
+dump_bodies: true            # pixi run dump-bodies -> <session>/calibrations/rigid_bodies_<date>.yaml
+optitrack_repo: ~/Documents/repos/optitrack
+stop_confirm: true           # Enter at the end before the recording / tunnel are stopped
+notify: true                 # sound + spoken message + banner on the Mac whenever Enter/input is needed (insect turn, EV, failure, end)
+notify_repeat_s: 45          # repeated every 45 s until answered
+
+# --- merge during the session --------------------------------------------------------
+merge_inline: true
+merge_fusion: pyramid        # A (Laplacian pyramid) keeps up with the capture (~50 s per stop effective with 3 jobs);
+                             # wavelet = B (Forster 2004) looked the same on the 9 Sep stops but needs ~120 s per stop
+                             # effective -> with the 250-frame buffer the capture would wait for the merges (~11 h session).
+                             # B can be re-run later from the phone's raw copies.
+merge_format: tif            # 16-bit sRGB TIFF master + JPEG preview
+merge_jobs: 3                # parallel merges (pyramid 105-260 s each under contention, wavelet 320-480 s)
+merge_ref_index: -1          # reference = the init-focus frame of each stop
+merge_delete_raw: true       # the MAC copies only, after the merged file was written and read back
+merge_index_maps: false
+merge_max_pending: 5         # <= 5 unmerged stacks (250 frames) on the Mac; the next pull waits for a finished merge
+merge_python: ""             # the pixi env python (rawpy, cv2, dtcwt)

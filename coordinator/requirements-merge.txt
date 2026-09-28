@@ -1,0 +1,9 @@
+# Mac-side focus-stack merge, COLMAP export and the ChArUco check
+# (stack_merge.py, colmap_export.py, tools/check_intrinsics.py).
+# The optitrack pixi env has numpy/opencv/pyyaml; rawpy was added there too
+# (`pixi add --pypi rawpy`). For any other interpreter:
+#   python3 -m venv ~/.venvs/merge && ~/.venvs/merge/bin/pip install -r coordinator/requirements-merge.txt
+numpy
+opencv-python-headless>=4.8
+rawpy
+pyyaml

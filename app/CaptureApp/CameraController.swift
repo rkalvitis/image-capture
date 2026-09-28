@@ -26,6 +26,11 @@ final class CameraController: NSObject {
     private let photoOutput = AVCapturePhotoOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
     private var rawFormat: OSType?
+    private var rawFormatProRAW: OSType?
+    private var rawFormatBayer: OSType?
+    /// power knobs (hello: raw, quality, frame_rate) — see setPower()
+    var qualityPrioritization: AVCapturePhotoOutput.QualityPrioritization = .quality
+    private(set) var rawKind = "proraw"
     private var delegates: [Int64: PhotoDelegate] = [:]
     private let intrinsicsLock = NSLock()
     private var latestIntrinsics: (m: simd_float3x3, w: Int32, h: Int32)?
@@ -74,7 +79,9 @@ final class CameraController: NSObject {
         // pick the RAW pixel format now: ProRAW if offered, Bayer RAW otherwise
         let proraw = photoOutput.availableRawPhotoPixelFormatTypes.first(where: { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) })
         let bayer = photoOutput.availableRawPhotoPixelFormatTypes.first(where: { AVCapturePhotoOutput.isBayerRAWPixelFormat($0) })
+        rawFormatProRAW = proraw; rawFormatBayer = bayer
         rawFormat = proraw ?? bayer
+        rawKind = proraw != nil ? "proraw" : "bayer"
         let dims = CMVideoFormatDescriptionGetDimensions(dev.activeFormat.formatDescription)
         formatDescription = (proraw != nil ? "ProRAW" : (bayer != nil ? "BayerRAW" : "NO-RAW")) + " \(dims.width)x\(dims.height)"
 
@@ -146,6 +153,49 @@ final class CameraController: NSObject {
         log("settings: exposure \(exposureMode) \(exposureDescription()), wb \(wbMode), lens \(lensPosition)")
     }
 
+    /// Heat reduction, all optional (hello / ui): `raw` "proraw" (default, on-phone computational
+    /// processing per frame) or "bayer" (sensor data only, demosaic on the Mac); `quality`
+    /// "quality" | "balanced" | "speed" (ProRAW processing effort); `frame_rate` caps the session
+    /// frame rate (preview + intrinsics tap; the photo is unaffected). Returns a description.
+    func setPower(raw: String?, quality: String?, frameRate: Int?) throws -> String {
+        guard let dev = device else { throw CameraError.configuration("no device") }
+        if let r = raw {
+            switch r {
+            case "bayer":
+                guard let f = rawFormatBayer else { throw CameraError.configuration("Bayer RAW not offered") }
+                rawFormat = f; rawKind = "bayer"
+            case "proraw":
+                guard let f = rawFormatProRAW else { throw CameraError.configuration("ProRAW not offered") }
+                rawFormat = f; rawKind = "proraw"
+            default: throw CameraError.configuration("raw must be proraw | bayer")
+            }
+            let dims = CMVideoFormatDescriptionGetDimensions(dev.activeFormat.formatDescription)
+            formatDescription = (rawKind == "proraw" ? "ProRAW" : "BayerRAW") + " \(dims.width)x\(dims.height)"
+        }
+        if let q = quality {
+            switch q {
+            case "quality": qualityPrioritization = .quality
+            case "balanced": qualityPrioritization = .balanced
+            case "speed": qualityPrioritization = .speed
+            default: throw CameraError.configuration("quality must be quality | balanced | speed")
+            }
+        }
+        if let fps = frameRate {
+            try dev.lockForConfiguration()
+            let ranges = dev.activeFormat.videoSupportedFrameRateRanges
+            let minFps = ranges.map { $0.minFrameRate }.min() ?? 1
+            let maxFps = ranges.map { $0.maxFrameRate }.max() ?? 30
+            let f = min(max(Double(fps), minFps), maxFps)
+            dev.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(f))
+            dev.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(f))
+            dev.unlockForConfiguration()
+        }
+        let fpsNow = dev.activeVideoMinFrameDuration.seconds > 0 ? 1.0 / dev.activeVideoMinFrameDuration.seconds : 0
+        let desc = "raw \(rawKind), quality \(qualityPrioritization.rawValue), \(Int(fpsNow.rounded())) fps"
+        log("power: " + desc)
+        return desc
+    }
+
     /// Lock the lens at `position`, wait for the completion + settle, return the applied value.
     func setLensPosition(_ position: Float, settleMs: Int) throws -> Float {
         guard let dev = device else { throw CameraError.configuration("no device") }
@@ -156,6 +206,33 @@ final class CameraController: NSObject {
         _ = sem.wait(timeout: .now() + 3)
         Thread.sleep(forTimeInterval: Double(settleMs) / 1000.0)
         return dev.lensPosition
+    }
+
+    /// Autofocus on the frame centre (the robot puts the beetle there): continuous AF for
+    /// a bounded time (one-shot `.autoFocus` does not scan at macro distances), wait until
+    /// the lens stops moving, then re-lock at the position found and return it.
+    func autoFocus(settleMs: Int, timeoutS: Double = 4.0) throws -> Float {
+        guard let dev = device else { throw CameraError.configuration("no device") }
+        let mode: AVCaptureDevice.FocusMode = dev.isFocusModeSupported(.continuousAutoFocus) ? .continuousAutoFocus : .autoFocus
+        guard dev.isFocusModeSupported(mode) else { throw CameraError.configuration("autofocus not supported") }
+        let start = dev.lensPosition
+        try dev.lockForConfiguration()
+        if dev.isFocusPointOfInterestSupported { dev.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5) }
+        dev.focusMode = mode
+        dev.unlockForConfiguration()
+        let t0 = Date()
+        var last = dev.lensPosition, lastChange = Date(), moved = false
+        while Date().timeIntervalSince(t0) < timeoutS {
+            Thread.sleep(forTimeInterval: 0.02)
+            let lp = dev.lensPosition
+            if abs(lp - last) > 0.0005 { last = lp; lastChange = Date(); moved = true }
+            // settled: not adjusting and the lens has not moved for 0.5 s (after at least 0.6 s of AF)
+            if !dev.isAdjustingFocus && Date().timeIntervalSince(lastChange) > 0.5 && Date().timeIntervalSince(t0) > 0.6 { break }
+        }
+        let found = dev.lensPosition
+        log(String(format: "autofocus (%@): %.4f -> %.4f after %.2f s%@", mode == .continuousAutoFocus ? "continuous" : "one-shot",
+                   start, found, Date().timeIntervalSince(t0), moved ? "" : " (lens did not move)"))
+        return try setLensPosition(found, settleMs: settleMs)
     }
 
     func currentLensPosition() -> Float { device?.lensPosition ?? -1 }
@@ -194,7 +271,7 @@ final class CameraController: NSObject {
                 }
                 let applied = try setLensPosition(lp, settleMs: settleMs)
                 let settings = AVCapturePhotoSettings(rawPixelFormatType: raw)
-                settings.photoQualityPrioritization = .quality
+                settings.photoQualityPrioritization = qualityPrioritization
                 settings.flashMode = .off
                 if photoCalibrationAvailable && photoOutput.isCameraCalibrationDataDeliverySupported {
                     settings.isCameraCalibrationDataDeliveryEnabled = true

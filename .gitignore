@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+# Xcode UI state (per user, changes on every open)
+app/CaptureApp.xcodeproj/project.xcworkspace/xcuserdata/
+app/CaptureApp.xcodeproj/xcuserdata/
+# scratch outputs
+/tmp/

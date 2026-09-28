@@ -32,16 +32,19 @@ def yaw_diff_deg(a, b):
 
 class MocapSource:
     BODIES = ("phone", "popillia")
+    enabled = True          # False = no mocap at all (NoMocapSource): no stillness gate, no poses
 
     def __init__(self, history_s=30.0):
         self.history_s = history_s
         self._hist = {b: collections.deque() for b in self.BODIES}
+        self.counts = {b: 0 for b in self.BODIES}          # samples received per body (for the start-up check)
         self._lock = threading.Lock()
 
     # -- feed -----------------------------------------------------------
     def push(self, body, t, pos, quat):
         with self._lock:
             h = self._hist[body]
+            self.counts[body] = self.counts.get(body, 0) + 1
             h.append((float(t), np.asarray(pos, float), np.asarray(quat, float)))
             cutoff = t - self.history_s
             while h and h[0][0] < cutoff:
@@ -104,6 +107,26 @@ class MocapSource:
 
     def close(self):
         pass
+
+
+class NoMocapSource(MocapSource):
+    """No OptiTrack (robot/phone communication tests): every query says
+    "still" with no data; the coordinator then waits a fixed settle time
+    instead of the stillness gate and records no poses."""
+    enabled = False
+
+    def is_still(self, thresholds_mm, window_s, now=None, max_age_s=0.5):
+        return True, {b: None for b in thresholds_mm}
+
+    def wait_still(self, thresholds_mm, window_s, timeout_s, poll_s=0.1, on_poll=None):
+        time.sleep(window_s)
+        return True, {b: None for b in thresholds_mm}, window_s
+
+    def jitter_mm(self, body, t0, t1, min_samples=10):
+        return None, 0
+
+    def mean_pose(self, body, t0, t1):
+        return None, None
 
 
 class SyntheticMocapSource(MocapSource):

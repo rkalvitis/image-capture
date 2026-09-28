@@ -5,4 +5,5 @@
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 OPTITRACK=${OPTITRACK_REPO:-$HOME/Documents/repos/optitrack}
 export PYTHONPATH="$HERE/coordinator:${PYTHONPATH:-}"
+cd "$HERE" || exit 1            # relative plan paths (coordinator/..., robot/...) resolve against the repo root
 exec pixi run --manifest-path "$OPTITRACK/pixi.toml" python -m capture_coordinator.coordinator "$@"

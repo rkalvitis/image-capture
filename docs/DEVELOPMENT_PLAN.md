@@ -2,7 +2,11 @@
 
 Written 2026-09-03 from the discussion after the ring362 dataset. Each stage
 is written to be promptable as "implement Stage N of
-docs/capture_app/DEVELOPMENT_PLAN.md". Nothing here is built yet.
+docs/DEVELOPMENT_PLAN.md". Status 2026-09-09: Stages 0, 1, 2 (dry run), 4
+(patch, fake robot), 5 (merge + export, tested synthetically and on one
+handheld bench stack) and 7 (inline merge) are implemented; Stage 3 has its
+tool (`tools/check_intrinsics.py`) but no board session yet; the first lab
+run is still pending.
 
 ## 1. Goal
 
@@ -150,8 +154,10 @@ Design rules:
 
 ### Stage 3 — Intrinsics per lens position
 
-- ChArUco run at each stack lens position (board at the matching distance);
-  compare `calibrate_intrinsics.py` against Apple's fx, fy, cx, cy.
+- ChArUco run at each stack lens position (board at the matching distance),
+  shot with the app (`mac_client.py stack --lens ...`) so every frame carries
+  Apple's values; `tools/check_intrinsics.py` calibrates per lens position
+  and prints Apple vs board side by side (2026-09-09: tool ready, no session yet).
 - Decide: use Apple values directly, or a fitted per-position table.
 - Write `calibration/intrinsics_by_lens_position.yaml`; the COLMAP export
   assigns one PINHOLE camera per lens position (fixed, not refined).
@@ -182,16 +188,40 @@ Design rules:
   frame's intrinsics and its `frames.csv` row, and COLMAP/3DGS use exactly
   that K. Never merge without alignment and never pick a different
   reference per stop.
-- Merge tooling candidates: `align_image_stack` + `enfuse` (Hugin, free,
-  scriptable, handles the scale alignment), or a Laplacian-pyramid merge
-  in Python on the linear DNG data if enfuse's tone handling gets in the
-  way of ProRAW linearity. Decide in Stage 5 on one real stack.
+- Implemented 2026-09-09 in this repo (`coordinator/capture_coordinator/`):
+  `stack_merge.py` — rawpy linear decode (sensor-native), per-frame
+  alignment to the reference index (intrinsics ratio as the seed, ECC
+  between neighbouring frames chained to the reference, projected to
+  scale+shift), incremental Laplacian-pyramid fusion, `merged_frames.csv`
+  with the reference frame's K and pose, `alignment.csv` with predicted vs
+  measured breathing; ~65 s per 40-frame stop at full resolution.
+  `colmap_export.py` — one PINHOLE camera per image with the frame's own
+  fx fy cx cy (the trainer honours cx,cy since 2026-09-02, no padding),
+  poses from T_insect<-cam, random point ball around the ray intersection,
+  `camera_poses.csv` for the existing plots. Validated with the colmap binary.
 - Acceptance: a dataset goes from session end to a trained 3DGS with no
-  manual matching step.
+  manual matching step (pending the first rig stack).
 
 ### Stage 6 (optional) — Motorised turntable
 
 - Same handshake as the arm; removes the last prompt.
+
+### Stage 7 — Streaming merge during the session (decided 2026-09-09)
+
+- The phone keeps EVERY raw frame permanently (the full dataset is uploaded
+  from there later); the Mac has no room for 200 GB of DNGs per session.
+- So: after each stop is verified and pulled, a background worker on the Mac
+  merges that stop (`merge_worker.py` -> `stack_merge.py --stops N`) while
+  the next stop is being shot (merge ~65 s vs ~78 s shooting), writes the
+  merged image + row, and deletes that stop's DNGs from the Mac session
+  folder (`merge_delete_raw`); sidecars, frames.csv and the merged image
+  stay. The phone is never touched.
+- Plan keys: `merge_inline`, `merge_ref_index`, `merge_delete_raw`,
+  `merge_python`. The coordinator waits for the queue to drain at the end
+  of the session and logs `merge_done`. Implemented and covered by
+  `tests/test_dry_run.py::test_inline_merge_with_rig`.
+- Re-merging later (other reference index, other parameters) means pulling
+  the raw frames again from the phone (`tools/pull_frames.py`).
 
 ## 6. Coordinator state machine (per stop)
 

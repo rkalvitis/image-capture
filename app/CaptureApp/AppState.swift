@@ -14,6 +14,10 @@ final class AppState: ObservableObject {
     @Published var thermal = "nominal"
     @Published var freeText = "-"
     @Published var cameraReady = false
+    @Published var showPreview = true          // ui {"preview": false} / hello {"preview": false}: no live preview (less GPU + heat)
+    @Published var lowFps = false              // frame rate capped at 10 fps (preview + intrinsics tap)
+    @Published var dimmed = false              // screen brightness 0.02
+    private var brightnessBeforeDim: CGFloat = 0.5
     @Published var log: [String] = []
 
     let camera = CameraController()
@@ -52,6 +56,60 @@ final class AppState: ObservableObject {
         }
         thermal = AppState.thermalName()
         refreshFree()
+    }
+
+    // MARK: - heat buttons (panel) — the same knobs the Mac sets via hello/ui
+    func toggleFps() {
+        let target = lowFps ? 30 : 10
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                _ = try self.camera.setPower(raw: nil, quality: nil, frameRate: target)
+                DispatchQueue.main.async { self.lowFps = (target <= 10) }
+                self.addLog("frame rate \(target) fps")
+            } catch { self.addLog("fps: \(error)") }
+        }
+    }
+
+    func togglePreview() {
+        showPreview.toggle()
+        addLog(showPreview ? "preview on" : "preview off")
+    }
+
+    func toggleDim() {
+        if dimmed {
+            UIScreen.main.brightness = brightnessBeforeDim
+        } else {
+            brightnessBeforeDim = max(UIScreen.main.brightness, 0.3)
+            UIScreen.main.brightness = 0.02
+        }
+        dimmed.toggle()
+        addLog(dimmed ? "screen dimmed" : "screen brightness restored")
+    }
+
+    var ecoOn: Bool { lowFps && !showPreview && dimmed }
+
+    /// Eco = 10 fps + preview off + dim (all three), or all back.
+    func setEco(_ on: Bool) {
+        if (lowFps != on) { toggleFps() }
+        if (showPreview == on) { togglePreview() }
+        if (dimmed != on) { toggleDim() }
+    }
+
+    /// Screen brightness (0..1) and live preview on/off — both on the main thread.
+    private func applyScreen(brightness: Double?, preview: Bool?) {
+        if brightness == nil && preview == nil { return }
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            if let b = brightness {
+                if !self.dimmed { self.brightnessBeforeDim = max(UIScreen.main.brightness, 0.3) }
+                UIScreen.main.brightness = CGFloat(min(max(b, 0), 1))
+                self.dimmed = b <= 0.1
+            }
+            if let p = preview { self.showPreview = p }
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + 2)
+        addLog("screen: brightness \(brightness.map { String(format: "%.2f", $0) } ?? "-"), preview \(preview.map(String.init) ?? "-")")
     }
 
     static func thermalName() -> String {
@@ -142,28 +200,48 @@ extension AppState: ControlHandler {
             }
             store.session = session
             camera.settleMs = settle
+            // optional heat reduction: raw proraw|bayer, quality quality|balanced|speed, frame_rate, screen_brightness, preview
+            var power = ""
+            if msg["raw"] != nil || msg["quality"] != nil || msg["frame_rate"] != nil {
+                do {
+                    power = try camera.setPower(raw: msg["raw"] as? String, quality: msg["quality"] as? String,
+                                                frameRate: msg["frame_rate"] as? Int)
+                    if let f = msg["frame_rate"] as? Int { DispatchQueue.main.async { self.lowFps = f <= 10 } }
+                } catch {
+                    return ["type": "error", "reason": "power: \(error)", "t": now]
+                }
+            }
+            applyScreen(brightness: msg["screen_brightness"] as? Double, preview: msg["preview"] as? Bool)
             DispatchQueue.main.async {
                 self.sessionId = session
                 self.lensPosition = self.camera.currentLensPosition()
                 self.exposureText = self.camera.exposureDescription()
+                self.formatText = self.camera.formatDescription
             }
+            if !power.isEmpty { addLog("power: " + power) }
             addLog("hello: session \(session), lens \(lens)")
             return ["type": "ready", "t": now,
                     "device": UIDevice.current.model + " " + UIDevice.current.systemVersion,
                     "lens": "ultra-wide",
                     "format": camera.formatDescription,
+                    "raw": camera.rawKind, "quality": camera.qualityPrioritization.rawValue,
+                    "preview": showPreview,
                     "free_bytes": store.freeBytes(),
                     "calib_available": camera.photoCalibrationAvailable,
                     "intrinsics_video": camera.latestIntrinsicsDict() as Any]
 
         case "focus":
-            guard let lp = msg["lens_position"] as? Double else {
+            // lens_position: 0..1 = lock there; "auto" = one-shot AF on the centre, then lock at the result
+            let auto = (msg["lens_position"] as? String) == "auto" || (msg["auto"] as? Bool) == true
+            guard auto || msg["lens_position"] is Double else {
                 return ["type": "error", "reason": "focus without lens_position", "t": now]
             }
             do {
-                let applied = try camera.setLensPosition(Float(lp), settleMs: camera.settleMs)
+                let applied = auto ? try camera.autoFocus(settleMs: camera.settleMs)
+                                   : try camera.setLensPosition(Float(msg["lens_position"] as! Double), settleMs: camera.settleMs)
                 DispatchQueue.main.async { self.lensPosition = applied }
-                return ["type": "focus", "t": now, "lens_position": applied]
+                addLog(auto ? String(format: "autofocus -> %.4f", applied) : String(format: "focus %.4f", applied))
+                return ["type": "focus", "t": now, "lens_position": applied, "auto": auto]
             } catch {
                 return ["type": "error", "reason": "focus: \(error)", "t": now]
             }
@@ -205,13 +283,32 @@ extension AppState: ControlHandler {
                     "session": store.session as Any]
 
         case "ui":
-            // layout control from the Mac: {"horizontal": bool, "clips": bool, "fill": bool}
+            // layout control from the Mac: {"horizontal": bool, "clips": bool, "fill": bool,
+            //   "preview": bool, "screen_brightness": 0..1, "raw": proraw|bayer, "quality": ..., "frame_rate": n}
             let d = UserDefaults.standard
             if let v = msg["horizontal"] as? Bool { d.set(v, forKey: "uiHorizontal") }
             if let v = msg["clips"] as? Bool { d.set(v, forKey: "showClips") }
             if let v = msg["fill"] as? Bool { d.set(v, forKey: "previewFill") }
+            applyScreen(brightness: msg["screen_brightness"] as? Double, preview: msg["preview"] as? Bool)
+            var power = ""
+            if msg["raw"] != nil || msg["quality"] != nil || msg["frame_rate"] != nil {
+                do {
+                    power = try camera.setPower(raw: msg["raw"] as? String, quality: msg["quality"] as? String,
+                                                frameRate: msg["frame_rate"] as? Int)
+                    let f = msg["frame_rate"] as? Int
+                    DispatchQueue.main.async {
+                        self.formatText = self.camera.formatDescription
+                        if let f { self.lowFps = f <= 10 }
+                    }
+                } catch {
+                    return ["type": "error", "reason": "power: \(error)", "t": now]
+                }
+            }
             return ["type": "ui", "t": now, "horizontal": d.bool(forKey: "uiHorizontal"),
-                    "clips": d.bool(forKey: "showClips"), "fill": d.bool(forKey: "previewFill")]
+                    "clips": d.bool(forKey: "showClips"), "fill": d.bool(forKey: "previewFill"),
+                    "preview": showPreview, "screen_brightness": Double(UIScreen.main.brightness),
+                    "power": power, "raw": camera.rawKind, "quality": camera.qualityPrioritization.rawValue,
+                    "thermal": AppState.thermalName()]
 
         case "bye":
             addLog("bye")

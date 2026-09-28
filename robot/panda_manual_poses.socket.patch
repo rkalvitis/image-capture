@@ -1,6 +1,8 @@
---- /Users/robertskalvitis/Documents/repos/robo_arm/panda_manual_poses.py	2026-08-31 11:06:07
-+++ panda_manual_poses.py	2026-09-08 09:55:59
-@@ -32,6 +32,11 @@
+diff --git a/panda_manual_poses.py b/panda_manual_poses.py
+index e03df4e..d841716 100644
+--- a/panda_manual_poses.py
++++ b/panda_manual_poses.py
+@@ -32,7 +32,18 @@ RECORD MODE (_mode:=record) - move_group running:
  
  RUN MODE (default) - the arm steps through the recorded poses:
  
@@ -8,11 +10,33 @@
 +  the run with a reached/go exchange with the Mac capture coordinator
 +  (see confirm_socket.py); one run = one turntable step, repeat with
 +  run_cycles.sh. Default keyboard = unchanged behaviour.
++  _confirm_via:=none = DEBUG: no prompt at all, the arm just steps
++  through the poses (_wait_between_points seconds at each, also at the
++  initial pose). _obstacles:=false drops the keep-out sphere, rod and
++  screen (the planner then only avoids the robot itself and the
++  attached holder - watch the arm).
 +
      rosrun panda_moveit_ctrl panda_manual_poses.py _execute:=true
++    rosrun panda_moveit_ctrl panda_manual_poses.py _execute:=true _confirm_via:=none _obstacles:=false   # debug walk
  
    1. attaches the phone holder as collision geometry;
-@@ -76,6 +81,7 @@
+   2. moves to the INITIAL pose from _joint_file (joint_start.csv,
+@@ -54,7 +65,13 @@ RUN MODE (default) - the arm steps through the recorded poses:
+      joints, CSV log per pose (initial pose = row 0, same format
+      as the arc script), photo pause between poses
+      (_confirm_each_pose:=true = Enter, otherwise
+-     _wait_between_points seconds);
++     _wait_between_points seconds). Enter needs a real terminal:
++     with stdin redirected (nohup, &, launch file, ssh without -t)
++     the script refuses to start instead of walking through the
++     poses unconfirmed; Enters typed while the arm moves are
++     discarded, not queued. Flags are checked at startup - a
++     misspelled or underscore-less _name:=value is logged as
++     IGNORED, and the parsed values are printed;
+   6. ALWAYS returns: after the last pose (and its photo pause),
+      or after an abort, the arm revisits the reached poses in
+      reverse and finishes at the initial pose.
+@@ -76,6 +93,7 @@ from geometry_msgs.msg import Point
  from moveit_msgs.srv import GetStateValidity
  
  import panda_semicircle_motion as arc
@@ -20,11 +44,221 @@
  
  # Only present on the robot PC (franka_ros); record-mode motion
  # uses it to clear the monitored-stop state the robot enters when
-@@ -764,6 +770,14 @@
-     confirm_each_pose = get_param_once(
+@@ -143,9 +161,153 @@ def get_param_once(name, default):
+     return default
+ 
+ 
++# Every _name:=value the script understands (record + run mode). Used
++# only to catch flags that would otherwise be silently ignored.
++KNOWN_PARAMS = (
++    "confirm_each_pose", "confirm_port", "confirm_via", "execute",
++    "holder_mesh", "holder_yaw_deg", "holder_z_offset", "joint_file",
++    "keepout_ignored_links", "lens_axis", "lens_xyz", "mode",
++    "object_distance", "object_height", "object_radius", "object_xyz",
++    "obstacles", "output_file", "planning_time", "poses_file",
++    "retry_planning_time", "rod_radius", "screen_height", "screen_mesh",
++    "screen_scale", "screen_yaw_deg", "wait_between_points",
++)
++
++
++def check_cli_params():
++    """
++    Warns about command-line flags that get_param_once would never
++    see: `confirm_each_pose:=true` (no leading underscore = a ROS
++    topic remap, NOT a parameter), typos in the name, or a value
++    split off by a space (`_confirm_each_pose:= true`). Returns the
++    number of bad flags. Logged, not fatal, so a genuine remap still
++    works.
++    """
++
++    bad = 0
++    seen = []
++
++    for argument in sys.argv[1:]:
++        if argument.startswith("__"):
++            continue  # __name:=, __log:= ... added by rosrun/roslaunch
++
++        if ":=" not in argument:
++            if argument.startswith("_") or argument in KNOWN_PARAMS:
++                rospy.logwarn(
++                    "Ignored argument %r - a parameter is written "
++                    "_name:=value (no spaces).", argument)
++                bad += 1
++            continue
++
++        name, value = argument.split(":=", 1)
++
++        if not name.startswith("_"):
++            if name in KNOWN_PARAMS:
++                rospy.logwarn(
++                    "IGNORED: %r has no leading underscore, so ROS "
++                    "treats it as a topic remap. Use _%s", argument,
++                    argument)
++                bad += 1
++            continue
++
++        key = name.lstrip("_")
++        if key not in KNOWN_PARAMS:
++            rospy.logwarn(
++                "IGNORED: unknown parameter %r (known: %s)", argument,
++                ", ".join("_" + k for k in KNOWN_PARAMS))
++            bad += 1
++            continue
++
++        if value == "":
++            rospy.logwarn(
++                "%r has an empty value - if you meant a value, write "
++                "it without a space: %s:=value", argument, name)
++
++        seen.append("%s=%r" % (key, _parse_cli_value(value)))
++
++    if seen:
++        rospy.loginfo("Command-line parameters: %s", ", ".join(seen))
++    else:
++        rospy.loginfo("Command-line parameters: none (all defaults)")
++
++    return bad
++
++
++def _have_terminal():
++    """
++    True when Enter can be read: stdin is a tty or /dev/tty opens.
++    Uses arc.have_terminal when the arc module on this PC has it,
++    so this file can still be copied on its own next to an older
++    panda_semicircle_motion.py.
++    """
++
++    if hasattr(arc, "have_terminal"):
++        return arc.have_terminal()
++
++    try:
++        if sys.stdin is not None and sys.stdin.isatty():
++            return True
++    except (ValueError, AttributeError):
++        pass
++
++    try:
++        open("/dev/tty", "r").close()
++        return True
++    except (IOError, OSError):
++        return False
++
++
++def _parse_joint_rows(file_path):
++    """
++    Rows of 7 joint values from a text file, whatever the layout:
++      - separators: comma, semicolon, tab or spaces; quotes/brackets ignored
++      - plain rows  j1 .. j7
++      - the quoted form  "j1, .., j7",x,y,z,...   (first 7 numbers = joints)
++      - a header line naming the columns (joint1 .. joint7 are then taken
++        by NAME, so extra columns such as waypoint/angle/position are safe)
++    Blank lines are skipped. Python 2 and 3.
++    """
++    import re
++    joint_cols = None
++    rows = []
++    with open(file_path, "r") as handle:
++        for raw in handle:
++            line = raw.strip()
++            if not line:
++                continue
++            cleaned = re.sub(r'[\[\]"\']', " ", line)
++            tokens = [t for t in re.split(r"[,;\t ]+", cleaned) if t]
++            if re.search(r"[A-Za-z]", cleaned):
++                # header: remember where joint1..joint7 are
++                names = [t.strip().lower() for t in tokens]
++                idx = []
++                for j in range(1, 8):
++                    for cand in ("joint%d" % j, "joint_%d" % j, "j%d" % j, "q%d" % j):
++                        if cand in names:
++                            idx.append(names.index(cand))
++                            break
++                joint_cols = idx if len(idx) == 7 else None
++                continue
++            try:
++                nums = [float(t) for t in tokens]
++            except ValueError:
++                raise ValueError(
++                    "Non-numeric row in {}: {!r}".format(file_path, line))
++            if joint_cols is not None and len(nums) > max(joint_cols):
++                rows.append([nums[i] for i in joint_cols])
++            elif len(nums) >= 7:
++                rows.append(nums[:7])
++            else:
++                raise ValueError(
++                    "Row with fewer than 7 joint values in {}: {!r}".format(
++                        file_path, line))
++    return rows
++
++
+ def load_poses(file_path):
+     """
+-    Reads the poses CSV: one row per pose, 7 joint values each.
++    Reads the poses CSV: one row per pose, 7 joint values each (plain or
++    quoted format, see _parse_joint_rows).
+     """
+ 
+     file_path = os.path.abspath(os.path.expanduser(file_path))
+@@ -156,12 +318,12 @@ def load_poses(file_path):
+             "_mode:=record".format(file_path)
+         )
+ 
+-    values = np.loadtxt(file_path, delimiter=",", ndmin=2)
++    values = np.array(_parse_joint_rows(file_path), dtype=float)
+ 
+-    if values.shape[1] != 7:
++    if values.size == 0 or values.shape[1] != 7:
+         raise ValueError(
+-            "Every row must contain exactly 7 joint values, "
+-            "got {} columns.".format(values.shape[1])
++            "Every row must contain exactly 7 joint values ({}).".format(
++                file_path)
+         )
+ 
+     if not np.all(np.isfinite(values)):
+@@ -172,6 +334,20 @@ def load_poses(file_path):
+     return [row.tolist() for row in values]
+ 
+ 
++def load_joint_position_any(file_path):
++    """
++    Initial pose from _joint_file in either format (plain 7 values, or the
++    quoted joints + pose columns); falls back to arc.load_joint_position.
++    """
++    try:
++        rows = _parse_joint_rows(os.path.abspath(os.path.expanduser(file_path)))
++        if rows:
++            return rows[0]
++    except (IOError, ValueError):
++        pass
++    return arc.load_joint_position(file_path)
++
++
+ def current_joints(move_group):
+     """
+     Reads the current 7 joint values, or None on a bad read.
+@@ -612,6 +788,8 @@ def main():
+     moveit_commander.roscpp_initialize(sys.argv)
+     rospy.init_node("panda_manual_poses", anonymous=False)
+ 
++    check_cli_params()
++
+     script_dir = os.path.dirname(os.path.abspath(__file__))
+ 
+     mode = get_param_once("~mode", MODE_RUN).strip().lower()
+@@ -723,7 +901,7 @@ def main():
+             )
+ 
+             try:
+-                base_joints = arc.load_joint_position(
++                base_joints = load_joint_position_any(
+                     record_joint_file
+                 )
+             except Exception as error:
+@@ -765,6 +943,44 @@ def main():
          "~confirm_each_pose", arc.CONFIRM_EACH_POSE
      )
-+
+ 
 +    # _confirm_via:=socket replaces every "press Enter" of the run with
 +    # a reached/go exchange with the Mac coordinator (confirm_socket.py);
 +    # implies _confirm_each_pose. Default 'keyboard' = unchanged.
@@ -32,24 +266,81 @@
 +    confirm_port = int(get_param_once("~confirm_port", 5600))
 +    if confirm_via == "socket":
 +        confirm_each_pose = True
- 
++    elif confirm_via in ("none", "auto", "off"):
++        if confirm_each_pose is True:
++            rospy.logerr(
++                "_confirm_each_pose:=true together with _confirm_via:=%s "
++                "is contradictory (none = no prompt at all). Drop one.",
++                confirm_via)
++            return 1
++        # debug walk: every "confirmation" is a _wait_between_points pause
++        confirm_via = "none"
++        confirm_each_pose = True
++    elif confirm_via != "keyboard":
++        rospy.logerr("_confirm_via must be keyboard | socket | none, not %r", confirm_via)
++        return 1
++
++    if confirm_via == "keyboard" and confirm_each_pose:
++        # Enter must come from a real terminal. With stdin closed or
++        # redirected (nohup, `&`, a launch file, ssh without -t, a
++        # wrapper script) input() raises EOFError and wait_for_enter
++        # just continues - the arm would walk through every pose
++        # unconfirmed. Refuse instead.
++        if not _have_terminal():
++            rospy.logerr(
++                "_confirm_each_pose:=true but there is no terminal to "
++                "read Enter from (stdin is not a tty and /dev/tty is "
++                "not available). Run the script in an interactive "
++                "terminal (ssh -t ...), or use _confirm_via:=socket."
++            )
++            return 1
++    # _obstacles:=false: no keep-out sphere / support rod / background screen
++    build_scene = bool(get_param_once("~obstacles", True))
++
      # Initial pose: every run starts AND ends here (same file the
      # arc script uses).
-@@ -892,7 +906,13 @@
+     joint_file = get_param_once(
+@@ -884,7 +1100,7 @@ def main():
+         return 1
+ 
+     try:
+-        init_joints = arc.load_joint_position(joint_file)
++        init_joints = load_joint_position_any(joint_file)
+     except Exception as error:
+         rospy.logerr("Error reading the joint file: %s", str(error))
+         moveit_commander.roscpp_shutdown()
+@@ -892,7 +1108,16 @@ def main():
  
      total = len(poses)
  
 +    if confirm_via == "socket":
 +        confirm = confirm_socket.ConfirmServer(port=confirm_port, poses=total)
++    elif confirm_via == "none":
++        confirm = confirm_socket.AutoConfirm(float(wait_between_points))
 +    else:
 +        confirm = confirm_socket.KeyboardConfirm(arc.wait_for_enter)
 +
      rospy.loginfo("Poses file: %s (%d poses)", poses_file, total)
-+    rospy.loginfo("Confirmation: %s", confirm_via)
++    rospy.loginfo("Confirmation: %s%s", confirm_via,
++                  "" if build_scene else " (obstacles disabled)")
      rospy.loginfo("Initial pose file: %s", joint_file)
      rospy.loginfo("Execution enabled: %s", execute_motion)
      rospy.loginfo(
-@@ -1046,12 +1066,18 @@
+@@ -1025,7 +1250,12 @@ def main():
+                 tilt_deg
+             )
+ 
+-    if not build_obstacles(
++    if not build_scene:
++        rospy.logwarn(
++            "Obstacles DISABLED (_obstacles:=false): no keep-out sphere, "
++            "support rod or background screen in the planning scene."
++        )
++    elif not build_obstacles(
+             scene, move_group, robot, object_xyz,
+             object_radius, rod_radius, object_height,
+             screen_mesh, screen_scale, screen_height,
+@@ -1046,12 +1276,18 @@ def main():
      )
  
      # Object placement/check moment, always confirmed.
@@ -59,12 +350,12 @@
 -        "framing on the phone, clear the workspace, then confirm "
 -        "to start." % total
 -    )
-+    if not confirm.wait(
++    if confirm.wait(
 +            0, current_joints(move_group),
 +            "Robot at the initial pose, %d recorded poses ready. "
 +            "Place/check the object at the logged position and the "
 +            "framing on the phone, clear the workspace, then confirm "
-+            "to start." % total):
++            "to start." % total) is False:
 +        rospy.logwarn("Run aborted by the coordinator at the initial pose.")
 +        confirm.done()
 +        confirm.close()
@@ -74,7 +365,7 @@
  
      mark_event("init_confirmed", 0)
  
-@@ -1125,10 +1151,14 @@
+@@ -1125,10 +1361,14 @@ def main():
  
          if index < total:
              if confirm_each_pose:
@@ -82,10 +373,10 @@
 -                    "Pose %d/%d done - take the photo, then "
 -                    "confirm to move on." % (index, total)
 -                )
-+                if not confirm.wait(
++                if confirm.wait(
 +                        index, joints,
 +                        "Pose %d/%d done - take the photo, then "
-+                        "confirm to move on." % (index, total)):
++                        "confirm to move on." % (index, total)) is False:
 +                    rospy.logwarn("Run aborted by the coordinator.")
 +                    mark_event("pose_left", index)
 +                    aborted = True
@@ -93,7 +384,7 @@
              else:
                  rospy.loginfo(
                      "Waiting %.2f s before the next pose...",
-@@ -1152,7 +1182,8 @@
+@@ -1152,7 +1392,8 @@ def main():
  
          if not aborted and reached_poses:
              if confirm_each_pose:
@@ -103,7 +394,7 @@
                      "Last pose done - take the final photo, then "
                      "confirm to return to the initial pose."
                  )
-@@ -1177,6 +1208,9 @@
+@@ -1177,6 +1418,9 @@ def main():
  
          mark_event("run_end")
  

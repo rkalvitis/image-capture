@@ -1,0 +1,50 @@
+# MAIN TEST (2026-09-09): arm motion + automatic capture, both computers talking.
+# ONE run = 9 robot poses, a 50-frame stack at each (9 x 50 = 450 frames -> 9 merged
+# images); no insect rotation. At every pose the lens is set to the init focus and
+# the coordinator waits for Enter (or a typed lens value) before shooting.
+# OptiTrack is NOT used (--mocap none): no stillness gate, no poses; the init focus comes from the plan.
+#
+#   bash tools/run_coordinator.sh --plan coordinator/plan.maintest.yaml --tunnel --mocap none
+#
+name: maintest
+turntable_steps: 1           # one run only (36 = the full dataset later)
+turntable_step_deg: 10.0
+turntable_yaw_tol_deg: 0.5
+turntable_confirm: enter     # Enter on the Mac before the run starts (insect placed)
+pose_confirm: true           # Enter at every pose after the lens is set to the stack centre (type 0..1 to re-centre)
+poses: 8                     # rows of manual_poses.csv = aug31 poses 1,2,3,4,5,6,7,9 (pose 8 not used)
+shoot_initial_pose: true     # + a stack at the initial pose (joint_start.csv = aug31 pose 0) before go(0) -> 9 stacks per run
+lens_position_initial: 0.3333   # init focus of the initial pose (IMG_6823)
+# init focus per pose 1..8 = the EXACT lens position of the aug31 image at yaw 176.48 (IMG_6859 6895 6931 6968 7005 7040
+# 7077 7150); the table lookup below gives the same values — this list is only the fallback, no medians anywhere
+lens_position: [0.2510, 0.3412, 0.1961, 0.1020, 0.1569, 0.3098, 0.1608, 0.2392]
+focus_table: coordinator/focus_aug31.yaml
+focus_mode: table            # init focus per pose = the aug31 image of the same pose nearest focus_table_yaw
+focus_table_yaw: 176.48      # the first insect rotation of the aug31 session (IMG_6823..): used for EVERY stop of this test
+frames_per_stop: 50          # uniform 0.0..0.5 (step 0.0102), shifted so the init focus is exactly one frame; ~100 s per pose
+focus_stack_step: 0
+focus_stack_start: 0.0
+focus_stack_end: 0.5
+settle_ms: 300
+exposure_mode: locked        # meter once at hello, then hold
+wb: {mode: locked}
+still_window_s: 1.0          # ignored with --mocap none (fixed 1 s settle instead)
+still_phone_mm: 0.1
+still_popillia_mm: 0.1
+still_timeout_s: 15.0
+max_retries: 2
+# phone heat: preview off, dim, 10 fps, ProRAW at speed priority
+phone_raw: proraw
+phone_quality: speed
+phone_frame_rate: 10
+phone_screen_brightness: 0.02
+phone_preview: false
+phone_host: 127.0.0.1
+phone_port: 5601
+phone_bundle_id: ch.idsia.capture
+robot_host: 192.168.201.158   # the robot PC on the switch subnet 192.168.201.0/24 (Mac: en6 USB-Ethernet, 192.168.201.245)
+robot_port: 5600
+output_root: /Users/robertskalvitis/Documents/repos/optitrack/datasets
+rig_transforms: /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/rig_transforms.yaml
+merge_inline: false          # merge afterwards: python -m capture_coordinator.stack_merge datasets/phone_<ts> --jobs 4
+merge_delete_raw: false
