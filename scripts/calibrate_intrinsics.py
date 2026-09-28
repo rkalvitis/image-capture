@@ -55,7 +55,9 @@ def make_board(spec):
 def load_image(path):
     """cv2 image from .jpg/.png directly, or the embedded preview of a .dng."""
     if not path.lower().endswith('.dng'):
-        img = cv2.imread(path)
+        # sensor-native: never apply per-image EXIF rotation (the phone rolls
+        # between poses; one consistent frame is required for calibration)
+        img = cv2.imread(path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
         if img is None:
             raise ValueError(f'{path}: unreadable')
         return img
@@ -73,7 +75,7 @@ def load_image(path):
         if off is None or cnt is None:
             raise ValueError(f'{path}: no embedded preview found')
         img = cv2.imdecode(np.frombuffer(mm[off:off + cnt], np.uint8),
-                           cv2.IMREAD_COLOR)
+                           cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
         if img is None:
             raise ValueError(f'{path}: preview decode failed')
         return img

@@ -207,7 +207,17 @@ def main():
     else:
         raise SystemExit(f'method {method!r} not available '
                          f'(got ETH + {list(results)})')
-    print(f'sketch/look anchored to method: {method}')
+
+    # sketch POSITION follows the marker-based lens estimate when available
+    # (orientation still comes from the solver — GT has no rotation)
+    gt = None
+    if os.path.exists('calibration/lens_marker_estimate.yaml'):
+        with open('calibration/lens_marker_estimate.yaml') as f:
+            gt = yaml.safe_load(f)
+    t_sketch = np.array(gt['lens_position_m']) if gt else t_x
+    print(f'sketch anchored at: '
+          f'{"MARKER-ESTIMATE position" if gt else "solver position"} '
+          f'+ {method} orientation')
 
     # mean board pose in world (via the PARK solution), then per-shot camera
     # position in the body frame: X_i = T_w2b_i^-1 . T_w2board . T_t2c_i^-1
@@ -280,29 +290,31 @@ def main():
         print(f'NOTE: {eth_path} not found — run calibrate-handeye-eth to '
               'include the ETH solver in the plot')
 
-    # physical ground truth (marker ball on the lens, scripts/lens_ground_truth.py)
-    gt_path = 'calibration/lens_ground_truth.yaml'
-    if os.path.exists(gt_path):
-        with open(gt_path) as f:
-            gt = yaml.safe_load(f)
+    # marker-based lens estimate (ball on the lens, scripts/lens_marker_estimate.py)
+    if gt is not None:
         t = np.array(gt['lens_position_m']) * 1000
+        # true 3D sphere (semi-transparent, radius = axial uncertainty) so
+        # solver points around/inside it stay visible
+        r_gt = float(gt['sigma_mm']['axial'])
+        u = np.linspace(0, 2 * np.pi, 24)
+        v = np.linspace(0, np.pi, 16)
+        fig.add_trace(go.Surface(
+            x=t[0] + r_gt * np.outer(np.cos(u), np.sin(v)),
+            y=t[1] + r_gt * np.outer(np.sin(u), np.sin(v)),
+            z=t[2] + r_gt * np.outer(np.ones_like(u), np.cos(v)),
+            colorscale=[[0, '#e34948'], [1, '#e34948']], showscale=False,
+            opacity=0.35, hoverinfo='skip', showlegend=False))
         fig.add_trace(go.Scatter3d(
             x=[t[0]], y=[t[1]], z=[t[2]], mode='markers',
-            marker=dict(size=11, color='#111111', symbol='x'),
-            name=f'GROUND TRUTH (lens ball)  ({t[0]:.0f},{t[1]:.0f},{t[2]:.0f}) mm',
-            hovertemplate=('physical ground truth<br>'
+            marker=dict(size=4, color='#e34948'),
+            name=f'marker estimate ±{r_gt:.0f} mm  '
+                 f'({t[0]:.0f},{t[1]:.0f},{t[2]:.0f}) mm',
+            hovertemplate=('marker-based lens estimate<br>'
                            f'±{gt["sigma_mm"]["lateral"]:.0f} mm lateral, '
                            f'±{gt["sigma_mm"]["axial"]:.0f} mm axial'
                            '<br>x=%{x:.1f} y=%{y:.1f} z=%{z:.1f} mm'
                            '<extra></extra>')))
-        print(f'ground truth included from {gt_path}')
-    look = R_x @ np.array([0, 0, 1.0])         # camera optical axis (cam +z)
-    tip = t_x * 1000 + look * ax_len * 0.6
-    fig.add_trace(go.Scatter3d(
-        x=[t_x[0] * 1000, tip[0]], y=[t_x[1] * 1000, tip[1]],
-        z=[t_x[2] * 1000, tip[2]], mode='lines',
-        line=dict(color='#55524c', width=6), name=f'look direction ({method})',
-        hoverinfo='skip'))
+        print('marker estimate included (calibration/lens_marker_estimate.yaml)')
 
     # rigid-body markers (from Motive, via scripts/dump_rigid_bodies.py)
     marker_pos = None
@@ -313,8 +325,12 @@ def main():
         if body:
             marker_pos = {m['name']: np.array(m['position_m'])
                           for m in body['markers']}
-            pts = np.array(list(marker_pos.values())) * 1000
-            names = list(marker_pos.keys())
+            # the temporary lens-measurement ball is not part of the real
+            # constellation — keep it out of the display
+            gt_ball = (gt or {}).get('marker_name', 'marker_6')
+            shown = {k: v for k, v in marker_pos.items() if k != gt_ball}
+            pts = np.array(list(shown.values())) * 1000
+            names = list(shown.keys())
             fig.add_trace(go.Scatter3d(
                 x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode='markers+text',
                 marker=dict(size=9, color='#eb6834', opacity=0.9),
@@ -336,15 +352,36 @@ def main():
     # the constellation is known; camera-frame fallback otherwise
     if marker_pos and all(k in marker_pos for k in PHONE_PLANE_MARKERS):
         (xs, ys, zs), uw, d_lens, side = phone_wireframe_on_plane(
-            R_x, t_x, marker_pos)
+            R_x, t_sketch, marker_pos)
         expect = side * (PHONE_T + CAM_BOX['bump'])
-        print(f'solved lens vs marker-2/3/4 plate plane: {d_lens * 1000:+.1f} mm '
+        print(f'sketch anchor vs marker-2/3/4 plate plane: {d_lens * 1000:+.1f} mm '
               f'(physically expect ≈ {expect:+.1f} mm on the side the camera '
-              f'looks toward; wrong sign or large deviation = translation error)')
-        sketch_name = 'iPhone 15 Pro (on m2/m3/m4 plane, approx.)'
+              f'looks toward)')
+        sketch_name = ('iPhone 15 Pro (at marker est., ⊥ line; '
+                       'in-plane spin approx.)')
+        # PHYSICAL CONSTRAINT: the lens axis is perpendicular to the phone,
+        # i.e. along the plate normal — draw the look line exactly that way,
+        # and report how far the solver's rotation deviates from it
+        p = [marker_pos[k] for k in PHONE_PLANE_MARKERS]
+        nrm = np.cross(p[1] - p[0], p[2] - p[0])
+        nrm /= np.linalg.norm(nrm)
+        look = side * nrm
+        dev = np.degrees(np.arccos(np.clip(
+            np.dot(R_x @ np.array([0, 0, 1.0]), look), -1, 1)))
+        print(f'solver look axis vs phone-perpendicular: {dev:.2f} deg '
+              f'(orientation-error indicator)')
+        look_name = 'look direction (⊥ phone)'
     else:
-        (xs, ys, zs), uw = phone_wireframe(R_x, t_x)
+        (xs, ys, zs), uw = phone_wireframe(R_x, t_sketch)
         sketch_name = 'iPhone 15 Pro (schematic, approx.)'
+        look = R_x @ np.array([0, 0, 1.0])
+        look_name = f'look direction ({method})'
+    tip = t_sketch * 1000 + look * ax_len * 0.6
+    fig.add_trace(go.Scatter3d(
+        x=[t_sketch[0] * 1000, tip[0]], y=[t_sketch[1] * 1000, tip[1]],
+        z=[t_sketch[2] * 1000, tip[2]], mode='lines',
+        line=dict(color='#55524c', width=6), name=look_name,
+        hoverinfo='skip'))
     fig.add_trace(go.Scatter3d(
         x=xs, y=ys, z=zs, mode='lines',
         line=dict(color='#8a8781', width=3),
@@ -352,15 +389,20 @@ def main():
     fig.add_trace(go.Scatter3d(
         x=uw[0], y=uw[1], z=uw[2], mode='lines',
         line=dict(color='#2a78d6', width=5),
-        name='ultra-wide lens (anchored at solved camera)',
+        name='ultra-wide lens (at ' + ('marker estimate)' if gt else
+                                       'solved camera)'),
         hoverinfo='skip'))
 
     fig.update_layout(
-        title=f'Camera in the phone rigid-body frame — {args.session}',
+        title=dict(text=f'Camera in the phone rigid-body frame — '
+                        f'{args.session}',
+                   x=0.02, xanchor='left', y=0.99, yanchor='top'),
         scene=dict(xaxis_title='x (mm)', yaxis_title='y (mm)',
                    zaxis_title='z (mm)', aspectmode='data'),
-        template='plotly_white', height=750,
-        legend=dict(orientation='h', yanchor='bottom', y=1.02))
+        template='plotly_white', height=860,
+        margin=dict(t=50, b=10),
+        # legend BELOW the plot — it can never overlap the title or the scene
+        legend=dict(orientation='h', yanchor='top', y=-0.02, x=0))
 
     out = args.out or (f'calibration/'
                        f'{os.path.basename(args.session.rstrip("/"))}/'

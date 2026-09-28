@@ -1,21 +1,20 @@
 """iPhone photo-session pose recording: OptiTrack driver + rosbag.
 
-Records EVERY rigid body Motive streams (the phone's marker body `phone`,
-the insect's body, ...) for the duration of a stop-and-shoot photo session.
-No camera node, no root — photos are taken on the iPhone and matched to
-these poses afterwards by scripts/match_photos.py via EXIF timestamps.
+Records ONLY the session's rigid bodies (RECORD_BODIES env var, default
+phone/phone_mount/popillia_mount) for the duration of a stop-and-shoot photo
+session. No camera node, no root — photos are taken on the iPhone and
+matched to these poses afterwards by scripts/match_photos.py via EXIF
+timestamps.
 
 Use the pixi tasks:
   pixi run record-poses       — real OptiTrack (Motive must be streaming)
   pixi run record-mock        — synthetic pose publisher, no hardware
 
-Bag output: <repo_root>/datasets/phone_YYYYMMDD_HHMMSS/
+Bag output: <repo_root>/datasets/phone_YYYYMMDD_HHMMSS/  (or $RECORD_DIR)
 Topics recorded (single -e regex — on Humble, mixing a topic list with -e
 silently records nothing):
-  /optitrack/*               — PoseStamped of EVERY rigid body Motive streams
-  /tf, /tf_static            — same poses as TF, for RViz playback
-  /diagnostics               — NatNet clock-sync stats (sync evidence)
-  /rosout                    — node warnings preserved alongside the data
+  /optitrack/phone, /optitrack/phone_mount, /optitrack/popillia_mount
+  (override the body list per run:  RECORD_BODIES="a b c" pixi run record-poses)
 
 Session routine (see docs/IPHONE_IMPLEMENTATION_PLAN.md Stage 1.2):
 start this, photograph the ms clock, shoot stop-and-shoot (~3 s still per
@@ -56,7 +55,10 @@ def generate_launch_description():
     client = os.environ.get('MY_IP') or _default_client_ip(server)
     frame  = os.environ.get('OPTITRACK_FRAME_ID', 'world')
 
-    bag_dir = os.path.join(
+    # RECORD_DIR (2026-09-15): record straight into a dataset folder, e.g.
+    # RECORD_DIR=datasets/sep15_10deg_9vertical_FS/mocap (the image-capture
+    # coordinator sets it); default = datasets/phone_<timestamp>/ as before.
+    bag_dir = os.environ.get('RECORD_DIR') or os.path.join(
         os.getcwd(), 'datasets',
         f'phone_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
     )
@@ -99,13 +101,19 @@ def generate_launch_description():
         pose_source,
 
         # ── rosbag recording ────────────────────────────────────────────────
-        # ONE -e regex: /optitrack/.* catches every rigid body regardless of
-        # Motive naming; the alternation covers the fixed topics. Do NOT pass
-        # a topic list alongside -e — on Humble that combination silently
-        # subscribes to nothing (empty bags).
+        # ONE -e regex listing exactly the session bodies — nothing else
+        # (no /tf, /rosout, ...). Do NOT pass a topic list alongside -e —
+        # on Humble that combination silently subscribes to nothing (empty
+        # bags). A topic only appears (and gets subscribed) once Motive
+        # actually TRACKS that body — an absent topic means the body's
+        # markers aren't visible/solving in Motive right now.
         ExecuteProcess(
             cmd=['ros2', 'bag', 'record', '--output', bag_dir,
-                 '-e', r'^(/optitrack/.*|/tf|/tf_static|/diagnostics|/rosout)$'],
+                 '-e', '^(' + '|'.join(
+                     '/optitrack/' + b for b in
+                     os.environ.get(
+                         'RECORD_BODIES',
+                         'phone phone_mount popillia_mount').split()) + ')$'],
             output='screen',
         ),
     ])

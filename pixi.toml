@@ -66,8 +66,65 @@ netifaces = ">=0.11"
 # colcon-built via the implicit `build` task that `launch`/`record-poses`
 # depend on — data_files land in the right place.
 
+# ──────────────────────────────────────────────────────────────────────────
+# Feature: masking
+#   Separate environment for the background-masking experiments
+#   (scripts/mask_birefnet.py, mask_sam_geom.py, compare_masks.py).
+#   Kept out of the ROS env on purpose: torch/transformers churn must not
+#   re-solve the RoboStack stack. PyPI wheels (not conda) for the ML stack —
+#   much faster solve on osx-arm64, and torch wheels ship Metal (MPS) support.
+# ──────────────────────────────────────────────────────────────────────────
+[feature.masking.dependencies]
+python = "3.11.*"
+pip = "*"
+
+[feature.masking.pypi-dependencies]
+torch = ">=2.4"
+torchvision = "*"
+transformers = ">=4.44"
+# timm + einops + kornia: imported by BiRefNet's HF remote code
+timm = "*"
+einops = "*"
+kornia = "*"
+numpy = "*"
+pillow = ">=10"
+opencv-python-headless = "*"
+pyyaml = "*"
+scipy = "*"
+
+# COLMAP bindings for the mocap→SfM pose refinement
+# (scripts/refine_poses_colmap.py). osx-arm64 only: pycolmap ships no
+# linux-aarch64 wheel, and the refinement runs on the Mac anyway.
+[feature.masking.target.osx-arm64.pypi-dependencies]
+pycolmap = ">=3.10"
+
+[feature.masking.tasks.mask-birefnet]
+description = "Experiment 1: off-the-shelf BiRefNet background removal on a stack session's composites."
+cmd = "python scripts/mask_birefnet.py"
+
+[feature.masking.tasks.mask-sam-geom]
+description = "Experiment 2: SAM prompted from the fitted rig geometry (specimen projection + rod-excluding negative points)."
+cmd = "python scripts/mask_sam_geom.py"
+
+[feature.masking.tasks.mask-textprompt]
+description = "Experiment 3: language-prompted masks (OWLv2 text query 'a beetle' -> box -> SAM); the mac-runnable stand-in for LLMSeg-style reasoning segmentation."
+cmd = "python scripts/mask_textprompt.py"
+
+[feature.masking.tasks.mask-hybrid]
+description = "Hybrid mask: union of both experiments minus the geometrically projected rod/mount carve-out."
+cmd = "python scripts/mask_hybrid.py"
+
+[feature.masking.tasks.apply-masks]
+description = "Render the composites with the background replaced (white/black/alpha) using a chosen mask set."
+cmd = "python scripts/apply_masks.py"
+
+[feature.masking.tasks.compare-masks]
+description = "Compare two mask sets: IoU, disagreement maps, self-contained HTML report."
+cmd = "python scripts/compare_masks.py"
+
 [environments]
 default = { features = ["optitrack"] }
+masking = { features = ["masking"], no-default-feature = true }
 
 # Lab defaults for the OptiTrack driver. ROS_LOCALHOST_ONLY: all ROS nodes run
 # on this Mac (NatNet to the OptiTrack PC is plain UDP, not DDS). Off the lab
@@ -134,7 +191,7 @@ description = "Show a millisecond clock to photograph at session start/end (cloc
 cmd = "python scripts/ms_clock.py"
 
 [tasks.match]
-description = "Match a session's photos to poses. Usage: pixi run match -- datasets/phone_<ts> --clock-shows HH:MM:SS.mmm [--rigid-body phone]"
+description = "Match a session's photos to poses. Usage: pixi run match -- datasets/phone_<ts> --clock-shows HH:MM:SS.mmm [--bodies phone phone_mount popillia_mount]"
 cmd = "python scripts/match_photos.py"
 
 [tasks.make-board]
@@ -149,6 +206,10 @@ cmd = "python scripts/calibrate_intrinsics.py"
 description = "Hand-eye (phone body -> lens) from a handheld board session. Usage: pixi run calibrate-handeye -- datasets/phone_<ts> [--clock-shows HH:MM:SS.mmm ...]"
 cmd = "python scripts/calibrate_handeye.py"
 
+[tasks.calibrate-handeye-robot]
+description = "ROBOT hand-eye (link8 -> camera) from a board run: photos by order vs manual_poses CSV. Usage: pixi run calibrate-handeye-robot -- <photo_dir> --csv <manual_poses.csv>"
+cmd = "PYTHONPATH=scripts python scripts/calibrate_handeye_robot.py"
+
 [tasks.calibrate-handeye-eth]
 description = "Hand-eye via the ETH-ASL dual-quaternion solver (2nd opinion; needs vendor/ clone, see script docstring). Usage: pixi run calibrate-handeye-eth -- calibration/phone_<ts>"
 cmd = "python scripts/calibrate_handeye_eth.py"
@@ -160,3 +221,7 @@ cmd = "python scripts/dump_rigid_bodies.py"
 [tasks.rviz-optitrack]
 description = "Launch RViz with the saved Optitrack config."
 cmd = "rviz2 -d rviz/optitrack.rviz"
+
+[pypi-dependencies]
+rawpy = ">=0.27.1, <0.28"
+dtcwt = ">=0.14.0, <0.15"

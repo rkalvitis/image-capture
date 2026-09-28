@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Physical ground truth for the lens position from a marker on the camera.
+"""Marker-based ESTIMATE of the lens position (not exact ground truth).
 
 Procedure (done 2026-07-13): a marker ball is rested centered on the
 ultra-wide lens ring, temporarily added to the `phone` rigid body in
@@ -13,12 +13,13 @@ center:
       − (ball-center height above the module face)   [from the plate plane:
               ball·n − phone thickness − module bump]
       − (module face → entrance pupil depth)         [teardown estimate]
-    = ground-truth lens position  (± error bars)
+    = estimated lens position  (± error bars; the pupil-depth term
+      is an assumption, hence estimate rather than ground truth)
 
-and writes calibration/lens_ground_truth.yaml, which plot_handeye.py draws
+and writes calibration/lens_marker_estimate.yaml, which plot_handeye.py draws
 as a star and every solver can be judged against.
 
-    pixi run -- python scripts/lens_ground_truth.py --ball-diameter-mm 20
+    pixi run -- python scripts/lens_marker_estimate.py --ball-diameter-mm 20
 """
 
 import argparse
@@ -43,7 +44,7 @@ def main():
                     help='module face -> optical center depth (teardown '
                          'estimate, default 2.0)')
     ap.add_argument('--markers', default='calibration/rigid_bodies.yaml')
-    ap.add_argument('--out', default='calibration/lens_ground_truth.yaml')
+    ap.add_argument('--out', default='calibration/lens_marker_estimate.yaml')
     args = ap.parse_args()
 
     with open(args.markers) as f:
@@ -72,13 +73,13 @@ def main():
     print(f'  above module face:    {h_cm:.2f} mm '
           f'(consistent with resting on a ~{2 * rim:.1f} mm dia lens ring)')
     print(f'drop to optical center: {drop * 1000:.2f} mm along the lens axis')
-    print(f'GROUND TRUTH lens:      {(gt * 1000).round(2).tolist()} mm')
+    print(f'MARKER-ESTIMATE lens:       {(gt * 1000).round(2).tolist()} mm')
     print(f'  above plate plane:    {h_ball - drop * 1000:.2f} mm')
     print('  error bars: ~1 mm lateral (ball centering), '
           '~2 mm axial (pupil depth)')
 
     # judge every stored solution
-    print('\nsolver vs ground truth:')
+    print('\nsolver vs marker estimate:')
     for root, _, files in sorted(os.walk('calibration')):
         for fn in sorted(files):
             if fn in ('hand_eye.yaml', 'hand_eye_eth.yaml'):
@@ -97,7 +98,8 @@ def main():
         yaml.safe_dump({
             'date': datetime.now().isoformat(timespec='seconds'),
             'method': 'marker ball on the ultra-wide lens ring '
-                      '(marker_6 of the phone body)',
+                      '(temporarily added to the phone body)',
+            'marker_name': args.marker_name,
             'ball_diameter_mm': args.ball_diameter_mm,
             'pupil_depth_mm': args.pupil_depth_mm,
             'lens_position_m': [float(v) for v in gt],

@@ -1,0 +1,90 @@
+date: '2026-08-31T15:00:03'
+variant: mocap-order (freedriven arm, phone body tracked)
+method: PARK
+n_pairs: 19
+pairs:
+- IMG_6791.DNG
+- IMG_6792.DNG
+- IMG_6793.DNG
+- IMG_6794.DNG
+- IMG_6795.DNG
+- IMG_6796.DNG
+- IMG_6798.DNG
+- IMG_6799.DNG
+- IMG_6801.DNG
+- IMG_6805.DNG
+- IMG_6808.DNG
+- IMG_6809.DNG
+- IMG_6810.DNG
+- IMG_6811.DNG
+- IMG_6817.DNG
+- IMG_6818.DNG
+- IMG_6819.DNG
+- IMG_6820.DNG
+- IMG_6821.DNG
+intrinsics_file: calibration/intrinsics_20260831.yaml
+bag: datasets/phone_20260831_142707/phone_20260831_142707_0.db3
+camera_in_body:
+  translation_m:
+  - 0.06514704176700312
+  - -0.01902241298918258
+  - -0.04845200684735631
+  quaternion_xyzw:
+  - 0.35535015686473015
+  - 0.8498221531773434
+  - 0.35760531262845197
+  - 0.15377585754918335
+method_agreement:
+  rot_deg_max: 1.086453016119548
+  trans_mm_max: 64.66257934041703
+camera_in_flange_INVALID:
+  translation_m:
+  - -0.03608052099357388
+  - -0.03668304979512258
+  - 0.1024843056507656
+  quaternion_xyzw:
+  - -0.4462553870994321
+  - -0.4468686190659401
+  - 0.7554158784961207
+  - 0.17467517652594827
+  via: datasets/phone_20260826_113325/registration.yaml
+  note: 'VOID: chained through the 20260826 body<->flange, but the phone body was
+    REDEFINED on different axes before this run (user, 2026-08-31). camera_in_body
+    is the valid result; a new body<->flange comes from the next replayed-CSV session.'
+validated: board-in-world consistency 1.0 mm median / 3.0 mm max, 1.7 deg median;
+  jackknife stability 0.5 deg / 1.0 mm
+T_flange_from_body_bridged:
+  rotation_matrix:
+  - - -0.7285852984356443
+    - -0.676309804081824
+    - -0.10848277193291166
+  - - -0.6826783916127346
+    - 0.7299006759199748
+    - 0.034571909357370346
+  - - 0.05580032731528684
+    - 0.09924742915748115
+    - -0.9934969910760366
+  quaternion_xyzw:
+  - 0.3657222363763315
+  - -0.9289756408851166
+  - -0.03601260695795853
+  - 0.044210819966082796
+  translation_m:
+  - 0.010543924457620112
+  - 0.010334028179168092
+  - 0.0659157763168828
+  note: 'NEW-body -> flange, bridged through the camera: flange side = August cased-lens
+    position + COLMAP-verified R_cam_from_flange (both body-independent); body side
+    = this board-run hand-eye. Accuracy ~2-3 deg / ~5-10 mm (chain of both calibrations).
+    Valid while the phone cradle seating is unchanged.'
+cradle_plane_constraint:
+  normal_link8:
+  - -0.70711
+  - 0.0
+  - 0.70711
+  plane_angle_deg: 45.0
+  source: phone_mount_conf3.stl, area-weighted normal of the 31560 mm^2 cradle back
+    face (measured 2026-08-31, exact to mesh precision)
+  meaning: the phone lies flat against this plane, so the true optical axis in link8
+    = this normal within ~1-3 deg (case compliance). HARD geometric gate for any flange-frame
+    camera orientation. August beetle-solved axis passes at 5.5 deg off.

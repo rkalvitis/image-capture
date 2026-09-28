@@ -24,22 +24,23 @@ applied to every photo timestamp. Two clock photos also expose clock drift.
 Alternatively pass --clock-offset SECONDS directly; with neither, 0 is used
 (fine for stop-and-shoot if both devices are NTP-synced, but measure it).
 
-Output frame (default): the camera pose is expressed **in the insect's
-body frame** (relative pose = object_pose⁻¹ ∘ camera_pose, both bodies
-interpolated at the photo instant). This supports the turntable method —
-fixed camera, insect rotated between shots — where a rotating insect with a
-fixed camera is equivalent to a camera orbiting a fixed insect. It is also
-correct for the older handheld-orbit sessions (there the object simply
-barely moves). --world switches back to raw world-frame camera poses.
+Output (default): one frames.csv row per photo with the **world-frame pose
+of every tracked body** (--bodies, default: phone phone_mount
+popillia_mount), each interpolated at the photo's corrected EXIF timestamp.
+Columns are prefixed per body (phone_x ... popillia_mount_qw) plus per-body
+quality metrics, so any relative transform (e.g. camera in the object's
+frame for a turntable session: object_pose⁻¹ ∘ camera_pose) can be computed
+downstream from the same row. A photo is rejected if ANY requested body has
+no pose data around its timestamp.
 
 Matching (default): the pose is interpolated at each photo's corrected EXIF
-timestamp — no shooting protocol is enforced. Per-row quality columns let
-you filter afterwards: 'gap_ms' (spacing of the bracketing pose samples;
-large = bridged across a tracking dropout) and 'pos_spread_mm' /
-'rot_spread_deg' (relative camera↔object motion within ±50 ms of the shot —
-the pose uncertainty a tens-of-ms timestamp error causes). Keeping both
-bodies still around each shot (turntable at rest) makes the pose immune to
-clock error.
+timestamp — no shooting protocol is enforced. Per-body quality columns let
+you filter afterwards: '<body>_gap_ms' (spacing of the bracketing pose
+samples; large = bridged across a tracking dropout) and
+'<body>_pos_spread_mm' / '<body>_rot_spread_deg' (that body's motion within
+±50 ms of the shot — the pose uncertainty a tens-of-ms timestamp error
+causes). Keeping every body still around each shot makes the poses immune
+to clock error.
 
 --require-still (opt-in strict mode): only accept photos with a still
 window around them (largest of ±1.5/±1.0/±0.6/±0.3 s whose pose spread is
@@ -386,18 +387,9 @@ def process_session(args):
               'Mac clocks agree (NTP). Measure it next session.',
               file=sys.stderr)
 
-    track = load_pose_track(session, args.rigid_body)
-    if not args.world:
-        try:
-            obj = load_pose_track(session, args.object_body,
-                                  allow_fallback=False)
-        except SystemExit as e:
-            print(f'WARNING: {e} — falling back to world-frame camera poses',
-                  file=sys.stderr)
-        else:
-            track = build_relative_track(track, obj)
-            print(f'poses expressed in the {args.object_body!r} body frame '
-                  f'({len(track.times)} relative samples)')
+    tracks = {b: load_pose_track(session, b,
+                                 allow_fallback=(len(args.bodies) == 1))
+              for b in args.bodies}
 
     matched, rejected = [], []
     for pf in photo_files:
@@ -408,32 +400,38 @@ def process_session(args):
             rejected.append((rel, f'EXIF parse failed: {e}'))
             continue
         t_ns = int(round((ex['epoch_s'] + offset) * 1e9))
-        if args.require_still:
-            res, reason = match_still_pose(
-                track, t_ns,
-                pos_thresh_m=args.pos_thresh_mm * 1e-3,
-                rot_thresh_rad=math.radians(args.rot_thresh_deg))
-        else:
-            res, reason = interp_pose(track, t_ns)
-        if res is None:
+        row, reason = [rel, t_ns], None
+        for body in args.bodies:
+            if args.require_still:
+                res, why = match_still_pose(
+                    tracks[body], t_ns,
+                    pos_thresh_m=args.pos_thresh_mm * 1e-3,
+                    rot_thresh_rad=math.radians(args.rot_thresh_deg))
+            else:
+                res, why = interp_pose(tracks[body], t_ns)
+            if res is None:
+                reason = f'{body}: {why}'
+                break
+            row += [*(round(float(v), 6) for v in res['pos']),
+                    *(round(float(v), 6) for v in res['quat']),
+                    round(res['still_ms'], 1),
+                    round(res['gap_ms'], 1),
+                    round(res['pos_spread_mm'], 2),
+                    round(res['rot_spread_deg'], 3)]
+        if reason is not None:
             rejected.append((rel, reason))
             continue
-        p, q = res['pos'], res['quat']
-        matched.append([rel, t_ns,
-                        *(round(float(v), 6) for v in p),
-                        *(round(float(v), 6) for v in q),
-                        round(res['still_ms'], 1),
-                        round(res['gap_ms'], 1),
-                        round(res['pos_spread_mm'], 2),
-                        round(res['rot_spread_deg'], 3),
-                        ex['iso'], ex['exposure_s']])
+        matched.append(row + [ex['iso'], ex['exposure_s']])
 
     frames_csv = os.path.join(session, 'frames.csv')
     with open(frames_csv, 'w', newline='') as f:
         wr = csv.writer(f)
-        wr.writerow(['image_file', 't_capture_ns', 'x', 'y', 'z',
-                     'qx', 'qy', 'qz', 'qw', 'still_ms', 'gap_ms',
-                     'pos_spread_mm', 'rot_spread_deg', 'iso', 'exposure_s'])
+        header = ['image_file', 't_capture_ns']
+        for body in args.bodies:
+            header += [f'{body}_{c}' for c in
+                       ('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'still_ms',
+                        'gap_ms', 'pos_spread_mm', 'rot_spread_deg')]
+        wr.writerow(header + ['iso', 'exposure_s'])
         wr.writerows(sorted(matched, key=lambda r: r[1]))
 
     rej_csv = os.path.join(session, 'rejected.csv')
@@ -553,16 +551,13 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('session', nargs='?',
                     help='session folder (datasets/phone_<ts>)')
-    ap.add_argument('--rigid-body', default='phone',
-                    help="Motive rigid body of the iPhone (default: phone)")
-    ap.add_argument('--object-body', default='popillia',
-                    help="Motive rigid body of the photographed object; "
-                         "camera poses are output in ITS body frame, so a "
-                         "rotating object + fixed camera becomes a camera "
-                         "orbit (default: popillia)")
-    ap.add_argument('--world', action='store_true',
-                    help='output raw world-frame camera poses instead of '
-                         'object-frame relative poses')
+    ap.add_argument('--bodies', nargs='+',
+                    default=['phone', 'phone_mount', 'popillia_mount'],
+                    metavar='BODY',
+                    help='Motive rigid bodies to match at each photo '
+                         'timestamp; frames.csv gets one world-frame pose '
+                         'column group per body (default: phone phone_mount '
+                         'popillia_mount)')
     ap.add_argument('--clock-shows', action='append', default=[],
                     metavar='HH:MM:SS.mmm',
                     help='time visible in a clock photo; repeat per clock photo '

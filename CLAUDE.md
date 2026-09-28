@@ -25,7 +25,7 @@ All commands run through pixi tasks (defined in `pixi.toml`), never bare `ros2`:
 - `pixi run record-poses` — driver + rosbag of every `/optitrack/*` body → `datasets/phone_<timestamp>/`. No sudo. Run for the duration of a photo session.
 - `pixi run record-mock` — same pipeline with a synthetic pose publisher; no hardware, no OptiTrack server. Use this to test recording/matching logic.
 - `pixi run ms-clock` — millisecond clock display; photograph it at session start/end (clock photo, measures the iPhone↔Mac clock offset).
-- `pixi run match -- datasets/phone_<ts> --clock-shows HH:MM:SS.mmm [--rigid-body phone]` — match `photos/*.dng` to poses → `frames.csv` (+ `rejected.csv`).
+- `pixi run match -- datasets/phone_<ts> --clock-shows HH:MM:SS.mmm [--bodies phone phone_mount popillia_mount]` — match `photos/*.dng` to poses → `frames.csv` (+ `rejected.csv`).
 - `pixi run rviz-optitrack` — RViz with the saved `rviz/optitrack.rviz` layout.
 
 There is no test suite for the project code, except `scripts/match_photos.py
@@ -85,15 +85,17 @@ not the lens optical center.
 - **Photo timestamps:** EXIF stores capture time to 1 ms resolution, but true accuracy is ~tens of ms (NTP clock offset + multi-frame merge). The stop-and-shoot protocol (~3 s still per shot) makes this irrelevant — any timestamp inside the still window selects the same pose. The clock photo measures the residual offset per session.
 
 ## Lab environment defaults
-Driver reads three env vars (lab defaults): `OPTITRACK_PC_IP=192.168.201.5`,
-`MY_IP` (auto-detected from the route to the Motive PC; fallback
-`192.168.201.245` = the lab Mac), `OPTITRACK_FRAME_ID=world`. `MY_IP` must NOT
-be set in `pixi.toml` activation env — that would override both auto-detection
-and per-run shell overrides. Override per run, e.g.
-`OPTITRACK_PC_IP=192.168.201.6 pixi run launch`. Motive must have the OptiTrack
-Streaming Engine ON, Unicast, rigid bodies ON, command port 1510 / data port
-1511. The phone's rigid body must be named exactly **`phone`** in Motive
-(topic names are case-sensitive).
+Driver reads three env vars (lab defaults): `OPTITRACK_PC_IP=192.168.201.5`
+(the Motive PC, hostname dti-22398; verified alive 2026-07-21 — NOT `.245`,
+which is the lab Mac's own address), `MY_IP` (auto-detected from the route to
+the Motive PC; fallback `192.168.201.245` = the lab Mac),
+`OPTITRACK_FRAME_ID=world`. `MY_IP` must NOT be set in `pixi.toml` activation
+env — that would override both auto-detection and per-run shell overrides.
+Override per run, e.g. `OPTITRACK_PC_IP=192.168.201.6 pixi run launch`. Motive
+must have the OptiTrack Streaming Engine ON, Unicast, rigid bodies ON, command
+port 1510 / data port 1511. The tracked rigid bodies must be named exactly
+**`phone`**, **`phone_mount`**, **`popillia_mount`** in Motive (topic names
+are case-sensitive).
 
 ## Repo hygiene
 Clone must live on a **local-disk path with no spaces** (not iCloud Drive) —
