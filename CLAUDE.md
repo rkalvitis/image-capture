@@ -25,7 +25,16 @@ robot/              COPY of the robot side (panda_manual_poses.py patched, .patc
                     fake_robot.py, run_cycles.sh, manual_poses.csv = 9 aug31 poses for the main test). SOURCE OF TRUTH = ~/Documents/repos/robo_arm (applied
                     there 2026-09-09) — the arm runs on a different PC; edit there, keep this copy in sync
 tools/              mac_client.py (bench client), usb_tunnel.sh, pull_frames.py, run_coordinator.sh,
-                    check_intrinsics.py (Stage 3: Apple vs ChArUco per lens position)
+                    check_intrinsics.py (Stage 3: Apple vs ChArUco per lens position),
+                    ubuntu_info.sh (run on the robot PC, paste the output: arch, usbmuxd, pixi, sudo, ROS 1, tools)
+optitrack/          THE FORMER ~/Documents/repos/optitrack REPO, merged 2026-09-28 with git subtree (history kept,
+                    38 commits, its own CLAUDE.md/README/RECORD_DATASET.md). pixi.toml = the ONE python env
+                    (RoboStack ROS 2 Humble + rawpy/opencv/dtcwt; platforms osx-arm64, linux-64, linux-aarch64),
+                    src/ = NatNet driver + listener + launch files, scripts/ = calibration, matching, plots,
+                    masking and GS scripts (kept as they were; masking/3DGS are out of scope), submodules
+                    src/optitrack_msgs (https) and vendor/hand_eye_calibration. datasets/, calibration photos
+                    and bags, docs/, thesis/, 3dprinter/ are git-ignored and STILL LIVE in the old folder
+                    ~/Documents/repos/optitrack/ (user's decision) -> plan paths point there.
 tests/              test_dry_run.py, test_stack_merge.py, test_colmap_export.py — must stay green
                     (merge/export tests need opencv: run with the pixi env or a venv from requirements-merge.txt)
 docs/               plan, protocol, decisions
@@ -43,8 +52,8 @@ docs/               plan, protocol, decisions
   string shows a different id — use 4QBP63RP9N), bundle id `ch.idsia.capture`.
 - Robot PC: separate machine on the lab LAN, ROS 1, NO access from here.
   Its IP/port still to be filled into `coordinator/plan.yaml` (`robot_host`).
-- Mocap: OptiTrack driver runs on this MacBook via the optitrack repo's pixi env
-  (`~/Documents/repos/optitrack`, `pixi run record-poses`).
+- Mocap: OptiTrack driver runs via the pixi env in `optitrack/` (this repo since
+  2026-09-28; `cd optitrack && pixi run record-poses`), on the Mac or on the Ubuntu PC.
 
 ## Build / install / run (all from the terminal, phone on USB-C)
 
@@ -158,7 +167,28 @@ notifications for every prompt (`notify`); robot script has a debug walk
 `turntable_confirm: enter`, `pose_confirm: true` (Enter / lens value at every
 pose), `--mocap none` possible. `robot_host` still to be set.
 
-## STATE 2026-09-18 (read this first)
+## STATE 2026-09-28 (read this first)
+
+- **Branch `image-capture-pipeline`** (master = the old two-commit state): first commit = the
+  whole working tree of 2026-09-28 (+ .gitignore, pyc/xcuserstate untracked), then the
+  optitrack repo merged into `optitrack/` by `git subtree add` (history kept), submodules
+  re-registered, then the Linux changes below. The user's robot-arm code stays in its own
+  repo (robo_arm); `robot/` here is the copy needed by the dry run and tests.
+- **One computer (Ubuntu robot PC) is the goal.** Everything session-time now runs on Linux
+  too: `launcher.py` (Notifier: spd-say|espeak-ng + paplay|aplay + notify-send; app launch:
+  `pymobiledevice3 developer dvt launch --kill-existing`, needs `sudo pymobiledevice3 remote
+  tunneld` on iOS 17+, else it tells the operator to tap the icon; `app_launch_cmd` override),
+  `plan.py` (`optitrack_repo` "" or relative = `<repo>/optitrack`; `~` and `$VARS` in all
+  plan paths), `tools/run_coordinator.sh` (uses `<repo>/optitrack`, strips a sourced ROS 1
+  env), `optitrack/pixi.toml` + lock with `linux-64`. README "One-time setup on the Ubuntu
+  robot PC" is the checklist. Verified on the Mac only: 26 tests + dry run in the merged
+  env, colcon build and `record-mock` bag from the new location. NOT yet run on the robot PC
+  (no access from here): first step there is `bash tools/ubuntu_info.sh`.
+- **Mac stays the app build machine**: free Apple ID -> reinstall from Xcode every 7 days.
+- **Datasets** still in `~/Documents/repos/optitrack/datasets/` (git-ignored, 60 GB); the plan
+  files keep those absolute paths; on Ubuntu rsync them and edit `session_dir` etc.
+
+## STATE 2026-09-18 (superseded by 2026-09-28 for the repo layout; data facts still valid)
 
 - **The dataset was captured 2026-09-16/17**: `optitrack/datasets/sep15_10deg_9vertical_FS`,
   324 stops (36 rotations x 9 poses), all merged (pyramid, 16-bit sRGB TIFF), TIFFs also

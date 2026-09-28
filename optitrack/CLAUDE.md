@@ -1,5 +1,14 @@
 # CLAUDE.md
 
+> **Since 2026-09-28 this folder is a subtree of the `image-capture` repo** (branch
+> `image-capture-pipeline`): the session coordinator lives in `../coordinator`, the plan
+> files in `../coordinator/plan.*.yaml`, and `../tools/run_coordinator.sh` runs the
+> coordinator inside this pixi env. `pixi.toml` targets macOS and Linux (`linux-64`,
+> `linux-aarch64`) since the goal is one Ubuntu computer; "this Mac" below reads as
+> "the machine running the session". `datasets/`, `calibration/*/photos|bag`, `docs/`,
+> `thesis/`, `3dprinter/` are git-ignored and still live in `~/Documents/repos/optitrack/`.
+> The submodule `src/optitrack_msgs` now uses the https URL. Read `../CLAUDE.md` first.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this is

@@ -85,13 +85,13 @@ calibration_files:
 
 # --- start / stop everything from this one command ---------------------------------
 start_tunnel: true           # pymobiledevice3 usbmux forward 5601
-launch_app: true             # xcrun devicectl ... launch ch.idsia.capture
+launch_app: true             # macOS: xcrun devicectl; Linux: pymobiledevice3 developer dvt launch (needs sudo tunneld) or app_launch_cmd
 record_mocap: true           # pixi run record-poses -> <session>/mocap/bag_<ts>/ (driver + rosbag, bodies below)
 mocap_bodies: "phone popillia"
 dump_bodies: true            # pixi run dump-bodies -> <session>/calibrations/rigid_bodies_<date>.yaml
-optitrack_repo: ~/Documents/repos/optitrack
+optitrack_repo: optitrack       # relative = inside this repo (<repo>/optitrack, merged 2026-09-28); "" = the same
 stop_confirm: true           # Enter at the end before the recording / tunnel are stopped
-notify: true                 # sound + spoken message + banner on the Mac whenever Enter/input is needed (insect turn, EV, failure, end)
+notify: true                 # sound + spoken message + banner (Mac or Linux) whenever Enter/input is needed (insect turn, EV, failure, end)
 notify_repeat_s: 45          # repeated every 45 s until answered
 
 # --- merge during the session --------------------------------------------------------

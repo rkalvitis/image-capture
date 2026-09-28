@@ -2,7 +2,7 @@
 authors = ["Luca Crupi <luca.crupi@icloud.com>", "Elia Cereda <elia.cereda@gmail.com>"]
 channels = ["conda-forge"]
 name = "optitrack"
-platforms = ["osx-arm64", "linux-aarch64"]
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
 version = "0.1.0"
 
 # ──────────────────────────────────────────────────────────────────────────

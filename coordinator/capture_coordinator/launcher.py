@@ -4,9 +4,12 @@ runs the whole session:
 
     bash tools/run_coordinator.sh --plan coordinator/plan.sep15.yaml
 
-- USB tunnel: `pymobiledevice3 usbmux forward <port> <port>`
-- app: `xcrun devicectl device process launch --device <id> --terminate-existing <bundle>`
-- mocap: `pixi run record-poses` in the optitrack repo (driver + rosbag),
+- USB tunnel: `pymobiledevice3 usbmux forward <port> <port>` (Mac and Linux; Linux needs usbmuxd)
+- app: macOS `xcrun devicectl device process launch --device <id> --terminate-existing <bundle>`;
+  Linux `pymobiledevice3 developer dvt launch --kill-existing <bundle>`, which on iOS 17+
+  needs `sudo pymobiledevice3 remote tunneld` running (or `app_launch_cmd` in the plan);
+  if the launch fails the operator is told to tap the app icon and the session goes on
+- mocap: `pixi run record-poses` in the optitrack folder (driver + rosbag),
   RECORD_DIR=<session>/mocap, RECORD_BODIES="phone popillia"; stopped with
   SIGINT at the end so the bag closes cleanly
 - rigid bodies: `pixi run dump-bodies -- --out <session>/calibrations/rigid_bodies_<date>.yaml`
@@ -18,31 +21,64 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 
+IS_MAC = sys.platform == "darwin"
+
+
+def _first_tool(*names):
+    for n in names:
+        if shutil.which(n):
+            return n
+    return None
+
 
 class Notifier:
-    """macOS attention call while the coordinator waits for the operator:
-    a sound (afplay), a spoken message (say) and a notification banner
-    (osascript), repeated every `repeat_s` seconds until stop()."""
-    SOUND = "/System/Library/Sounds/Glass.aiff"
+    """Attention call while the coordinator waits for the operator: a sound, a spoken
+    message and a notification banner, repeated every `repeat_s` seconds until stop().
+    macOS: afplay + say + osascript. Linux: paplay|aplay|ffplay + spd-say|espeak-ng|espeak
+    + notify-send (whatever is installed; missing pieces are skipped, a missing speech
+    tool disables the notifier with one log line)."""
+    SOUNDS = ["/System/Library/Sounds/Glass.aiff",
+              "/usr/share/sounds/freedesktop/stereo/complete.oga",
+              "/usr/share/sounds/freedesktop/stereo/bell.oga",
+              "/usr/share/sounds/gnome/default/alerts/glass.ogg"]
 
     def __init__(self, enabled=True, repeat_s=45.0, voice="", log=print):
-        self.enabled = enabled and shutil.which("say") is not None
         self.repeat_s, self.voice, self.log = float(repeat_s), voice, log
+        self.speech = _first_tool("say") if IS_MAC else _first_tool("spd-say", "espeak-ng", "espeak")
+        self.player = _first_tool("afplay") if IS_MAC else _first_tool("paplay", "aplay", "ffplay")
+        self.banner = _first_tool("osascript") if IS_MAC else _first_tool("notify-send")
+        self.sound = next((s for s in self.SOUNDS if os.path.exists(s)), None)
+        self.enabled = enabled and self.speech is not None
+        if enabled and not self.enabled:
+            log("[notify] no speech tool found (macOS: say; Linux: spd-say, espeak-ng or espeak) -> notifications off")
         self._stop = threading.Event()
         self._thr = None
 
+    def _speech_cmd(self, text):
+        if self.speech == "say":
+            return ["say"] + (["-v", self.voice] if self.voice else []) + [text]
+        if self.speech == "spd-say":
+            return ["spd-say", "--wait"] + (["-y", self.voice] if self.voice else []) + [text]
+        return [self.speech] + (["-v", self.voice] if self.voice else []) + [text]        # espeak(-ng)
+
     def _once(self, text, banner):
         try:
-            if os.path.exists(self.SOUND):
-                subprocess.run(["afplay", self.SOUND], timeout=5, capture_output=True)
-            if banner:
-                subprocess.run(["osascript", "-e", 'display notification "%s" with title "Capture coordinator"'
-                                % text.replace('"', "'")], timeout=5, capture_output=True)
-            cmd = ["say"] + (["-v", self.voice] if self.voice else []) + [text]
-            subprocess.run(cmd, timeout=30, capture_output=True)
+            if self.sound and self.player:
+                cmd = [self.player, self.sound]
+                if self.player == "ffplay":
+                    cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", self.sound]
+                subprocess.run(cmd, timeout=5, capture_output=True)
+            if banner and self.banner:
+                if self.banner == "osascript":
+                    subprocess.run(["osascript", "-e", 'display notification "%s" with title "Capture coordinator"'
+                                    % text.replace('"', "'")], timeout=5, capture_output=True)
+                else:
+                    subprocess.run(["notify-send", "Capture coordinator", text], timeout=5, capture_output=True)
+            subprocess.run(self._speech_cmd(text), timeout=30, capture_output=True)
         except (OSError, subprocess.TimeoutExpired):
             pass
 
@@ -104,18 +140,40 @@ class Launcher:
         except RuntimeError as err:
             self.log(f"[launcher] tunnel restart: {err}")
 
+    def app_launch_command(self):
+        """The command that brings the app to the foreground on the phone, per platform
+        (or the plan's `app_launch_cmd`, {bundle} and {device} substituted)."""
+        if self.plan.app_launch_cmd:
+            return self.plan.app_launch_cmd.replace("{bundle}", self.plan.phone_bundle_id) \
+                                           .replace("{device}", self.plan.phone_device_id)
+        if IS_MAC:
+            if not self.plan.phone_device_id:
+                return None
+            return ["xcrun", "devicectl", "device", "process", "launch", "--device", self.plan.phone_device_id,
+                    "--terminate-existing", self.plan.phone_bundle_id]
+        # Linux: developer services over the RSD tunnel (iOS 17+: `sudo pymobiledevice3 remote tunneld`
+        # must be running; the CLI finds it by itself)
+        return ["pymobiledevice3", "developer", "dvt", "launch", "--kill-existing", self.plan.phone_bundle_id]
+
     def launch_app(self):
-        if not self.plan.phone_device_id:
+        cmd = self.app_launch_command()
+        if cmd is None:
             self.log("[launcher] launch_app: no phone_device_id in the plan — skipped")
             return
-        cmd = ["xcrun", "devicectl", "device", "process", "launch", "--device", self.plan.phone_device_id,
-               "--terminate-existing", self.plan.phone_bundle_id]
-        self.log("[launcher] app: " + " ".join(cmd))
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if res.returncode != 0:
-            self.log(f"[launcher] app launch failed: {(res.stderr or res.stdout).strip().splitlines()[-1:]}")
-        else:
+        shown = cmd if isinstance(cmd, str) else " ".join(cmd)
+        self.log("[launcher] app: " + shown)
+        try:
+            res = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, timeout=60)
+            ok, tail = res.returncode == 0, (res.stderr or res.stdout).strip().splitlines()[-1:]
+        except (OSError, subprocess.TimeoutExpired) as err:
+            ok, tail = False, [str(err)]
+        if ok:
             time.sleep(2.0)
+            return
+        self.log(f"[launcher] app launch failed: {tail}")
+        if not IS_MAC and not self.plan.app_launch_cmd:
+            self.log("[launcher] Linux: is `sudo pymobiledevice3 remote tunneld` running? Otherwise tap the "
+                     f"{self.plan.phone_bundle_id} icon on the phone now; the hello handshake will wait for it.")
 
     def record_mocap(self):
         bag_dir = os.path.join(self.session_dir, "mocap", "bag_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))

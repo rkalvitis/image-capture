@@ -5,6 +5,15 @@ from typing import List
 
 import yaml
 
+# <repo>/coordinator/capture_coordinator/plan.py -> <repo>
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def expand_path(v):
+    """`~` and `$VAR` / `${VAR}` in plan paths, so one plan file can serve the Mac and the
+    Ubuntu PC (e.g. session_dir: $DATASETS/sep15_10deg_9vertical_FS)."""
+    return os.path.expandvars(os.path.expanduser(v)) if v else v
+
 
 @dataclasses.dataclass
 class Plan:
@@ -80,17 +89,19 @@ class Plan:
     exposure_max_duration_s: float = 0.1    # the rig is static: shutter up to this, then the ISO rises
     # start/stop everything from the coordinator (tools/run_coordinator.sh --plan ...)
     start_tunnel: bool = False              # pymobiledevice3 usbmux forward for phone_port
-    launch_app: bool = False                # xcrun devicectl ... launch the app on the phone
-    phone_device_id: str = ""               # CoreDevice id for devicectl
+    launch_app: bool = False                # bring the app to the foreground: macOS xcrun devicectl, Linux pymobiledevice3 dvt launch
+    app_launch_cmd: str = ""                # override: shell command, {bundle} / {device} substituted ("" = per platform)
+    phone_device_id: str = ""               # CoreDevice id for devicectl (macOS only; Linux uses the bundle id)
     record_mocap: bool = False              # `pixi run record-poses` in the optitrack repo, bag -> <session>/mocap/
     mocap_bodies: str = "phone popillia"    # RECORD_BODIES for the bag
     dump_bodies: bool = False               # `pixi run dump-bodies` -> <session>/calibrations/rigid_bodies_<date>.yaml
-    optitrack_repo: str = "~/Documents/repos/optitrack"
+    optitrack_repo: str = ""                # folder with the OptiTrack pixi.toml; "" = <this repo>/optitrack (since 2026-09-28)
     robot_start_cmd: str = ""               # optional shell command that starts the robot runs, {cycles} substituted
     stop_confirm: bool = True               # at the end: wait for Enter before the recording/tunnel are stopped
-    notify: bool = False                    # macOS sound + spoken message + banner whenever the operator is needed
+    notify: bool = False                    # sound + spoken message + banner whenever the operator is needed
+                                            # (macOS: afplay/say/osascript; Linux: paplay|aplay, spd-say|espeak-ng, notify-send)
     notify_repeat_s: float = 45.0           # repeat the sound/speech every N s until the prompt is answered (0 = once)
-    notify_voice: str = ""                  # `say -v <voice>` ("" = system default)
+    notify_voice: str = ""                  # `say -v <voice>` / `spd-say -y <voice>` / `espeak-ng -v <voice>` ("" = default)
 
     @classmethod
     def load(cls, path):
@@ -110,12 +121,16 @@ class Plan:
             raise ValueError("merge_fusion must be pyramid | wavelet")
         if p.merge_format not in ("tif", "tif-linear", "png", "jpg"):
             raise ValueError("merge_format must be tif | tif-linear | png | jpg")
-        for key in ("session_dir", "optitrack_repo", "rig_transforms", "focus_table"):
+        for key in ("session_dir", "output_root", "optitrack_repo", "rig_transforms", "focus_table"):
             v = getattr(p, key)
             if v:
-                setattr(p, key, os.path.expanduser(v))
-        p.calibration_files = [os.path.expanduser(v) for v in p.calibration_files]
-        p.robot_files = [os.path.expanduser(v) for v in p.robot_files]
+                setattr(p, key, expand_path(v))
+        p.calibration_files = [expand_path(v) for v in p.calibration_files]
+        p.robot_files = [expand_path(v) for v in p.robot_files]
+        if not p.optitrack_repo:
+            p.optitrack_repo = os.path.join(REPO_ROOT, "optitrack")
+        elif not os.path.isabs(p.optitrack_repo):
+            p.optitrack_repo = os.path.join(REPO_ROOT, p.optitrack_repo)     # relative = inside this repo
         if p.focus_mode == "table" and not p.focus_table:
             raise ValueError("focus_mode table needs focus_table (tools/focus_from_dataset.py --yaml)")
         if len(p.lens_position) == 1 and p.poses > 1:

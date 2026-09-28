@@ -24,6 +24,13 @@ image-capture/
   NOTES.md        measured facts from the real phone/rig
 ```
 
+## Status (2026-09-28)
+
+The OptiTrack repo is merged into `optitrack/` (git subtree, history kept) on
+the branch `image-capture-pipeline`, and every session-time part also runs on
+Ubuntu (see "One-time setup on the Ubuntu robot PC"). Only the iPhone app build
+stays on the Mac. Nothing has been run on the robot PC yet.
+
 ## Status (2026-09-15)
 
 **Ready for the full dataset on 2026-09-16: `docs/DATASET_RUNBOOK.md`,
@@ -51,11 +58,49 @@ never into the Photos library, and never deletes anything.
 1. **Xcode** (App Store) with the iOS platform; `sudo xcode-select -s /Applications/Xcode.app`.
 2. `brew install xcodegen` — generates the Xcode project from `app/project.yml`.
 3. `pipx install pymobiledevice3` — USB tunnel + file pull.
-4. Coordinator python = the optitrack pixi env (rclpy for the mocap topics).
+4. Coordinator python = the pixi env of `optitrack/` (rclpy for the mocap
+   topics; since 2026-09-28 the OptiTrack repo lives inside this one).
+   `cd optitrack && pixi install` (RoboStack ROS 2 Humble, ~10 min once).
    It has numpy/opencv/pyyaml and, since 2026-09-09, `rawpy` (ProRAW decode
    for the merge). Any other interpreter for the merge tools:
    `pip install -r coordinator/requirements-merge.txt`.
 5. `brew install colmap` (optional; validates the exported model in the tests).
+
+## One-time setup on the Ubuntu robot PC (one computer for everything)
+
+Everything of a session runs on Linux too (verified on the Mac with the same
+code paths, 26 tests + dry run; not yet run on the robot PC — start with
+`bash tools/ubuntu_info.sh` there and paste the output). Only building and
+installing the iPhone app needs the Mac, and with the free Apple ID the app
+must be reinstalled from Xcode every 7 days (the profile expires).
+
+1. `git clone --recurse-submodules <this repo>` (or rsync it, submodules included).
+   Datasets are not in git: rsync `optitrack/datasets/` and `optitrack/calibration/*/photos|bag`
+   from the Mac to wherever you like, then set `session_dir` / `rig_transforms` /
+   `calibration_files` in the plan (paths accept `~` and `$VARS`, e.g. `$DATASETS/...`).
+2. `curl -fsSL https://pixi.sh/install.sh | bash`, then `cd optitrack && pixi install`
+   (pixi.lock has `linux-64` and `linux-aarch64` since 2026-09-28; the first
+   `pixi run record-poses` colcon-builds the workspace).
+3. iPhone over USB: `sudo apt install usbmuxd libimobiledevice-utils` (usbmuxd runs
+   as a service; `idevice_id -l` must show the phone after "Trust this computer"),
+   `pipx install pymobiledevice3`. The tunnel (`pymobiledevice3 usbmux forward`)
+   and the frame pull (house arrest) need no root.
+4. Launching the app without touching the phone (`launch_app: true`) needs the
+   developer tunnel on iOS 17+: `sudo pymobiledevice3 remote tunneld` in a
+   terminal for the whole session (the launcher then runs
+   `pymobiledevice3 developer dvt launch --kill-existing ch.idsia.capture`). Without
+   it the launcher prints one line and you tap the icon once before the session;
+   nothing else changes. `app_launch_cmd` in the plan overrides the command.
+5. Notifications: `sudo apt install speech-dispatcher espeak-ng libnotify-bin
+   pulseaudio-utils` (`spd-say`, `notify-send`, `paplay`; the notifier uses what
+   exists and switches itself off with one log line if no speech tool is found).
+6. ROS 1 on that PC: do not source its `setup.bash` in the coordinator's shell.
+   `tools/run_coordinator.sh` strips `/opt/ros/*` and `ROS_*` from the environment
+   if it finds them, so a sourced `.bashrc` is survivable, but keep the robot
+   script (ROS 1, `run_cycles.sh`) in its own terminal. `robot_host` becomes
+   `127.0.0.1`.
+7. Run exactly as on the Mac: `bash tools/run_coordinator.sh --plan coordinator/plan.sep15.yaml`
+   (it starts tunnel, app, dump-bodies and the mocap bag itself).
 
 ## Building and installing the app (phone connected via USB-C)
 
@@ -99,9 +144,10 @@ interactive dry run copy it and set `turntable_steps: 3`, `robot_host: 127.0.0.1
 
 ## Real session
 
-Mac (this MacBook, on the lab LAN, phone on USB-C, app open):
+Mac or Ubuntu PC (on the lab LAN, phone on USB-C, app open). By hand, or let
+the plan's `start_tunnel` / `launch_app` / `record_mocap` / `dump_bodies` do it:
 ```bash
-cd ~/Documents/repos/optitrack && RECORD_BODIES="phone popillia" pixi run record-poses   # OptiTrack driver + bag (terminal 1)
+cd optitrack && RECORD_BODIES="phone popillia" pixi run record-poses   # OptiTrack driver + bag (terminal 1)
 cd ~/Documents/repos/image-capture
 cp coordinator/plan.example.yaml coordinator/plan.yaml        # edit: robot_host, poses, focus_mode/frames_per_stop, rig_transforms, merge_*
 bash tools/run_coordinator.sh --plan coordinator/plan.yaml --tunnel      # terminal 2
@@ -181,10 +227,10 @@ Merge afterwards (below), not during the test.
 
 ```bash
 # merge (skip if merge_inline ran; re-runs only stops that are not merged yet)
-PYTHONPATH=coordinator pixi run --manifest-path ~/Documents/repos/optitrack/pixi.toml \
+PYTHONPATH=coordinator pixi run --manifest-path optitrack/pixi.toml \
     python -m capture_coordinator.stack_merge datasets/phone_<ts> --jobs 4 [--ref-index 10] [--align intrinsics]   # 16-bit TIFF masters
 # COLMAP model + camera_poses.csv (one PINHOLE camera per image, true cx/cy)
-PYTHONPATH=coordinator pixi run --manifest-path ~/Documents/repos/optitrack/pixi.toml \
+PYTHONPATH=coordinator pixi run --manifest-path optitrack/pixi.toml \
     python -m capture_coordinator.colmap_export datasets/phone_<ts> [--rig .../rig_transforms.yaml] [--scale 1.0]
 ```
 `merged/alignment.csv` compares, per frame, the breathing predicted by
