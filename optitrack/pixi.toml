@@ -1,0 +1,227 @@
+[workspace]
+authors = ["Luca Crupi <luca.crupi@icloud.com>", "Elia Cereda <elia.cereda@gmail.com>"]
+channels = ["conda-forge"]
+name = "optitrack"
+platforms = ["osx-arm64", "linux-aarch64"]
+version = "0.1.0"
+
+# ──────────────────────────────────────────────────────────────────────────
+# Feature: optitrack
+#   Conda deps (ROS 2 Humble via RoboStack) + PyPI deps (natnet_py installed
+#   editable from src/). The ament_python / ament_cmake packages under src/ are
+#   colcon-built (see the `build` task), not pip-installed.
+#
+#   NB: Python is pinned to 3.11 — the version this workspace's colcon build
+#   model and RoboStack Humble toolchain were built and tested against.
+# ──────────────────────────────────────────────────────────────────────────
+[feature.optitrack]
+channels = ["conda-forge", "robostack-humble"]
+
+[feature.optitrack.dependencies]
+python = "3.11.*"
+ros-humble-ros-base = "*"
+ros-humble-tf2-ros = "*"
+ros-humble-tf2-geometry-msgs = "*"
+ros-humble-python-orocos-kdl-vendor = "*"
+ros-humble-rviz2 = "*"
+# Needed to colcon-build the optitrack_msgs interface package (msg/*.msg).
+# numpy is required by rosidl_generator_py's find_package(Python ... NumPy).
+ros-humble-rosidl-default-generators = "*"
+numpy = "*"
+colcon-common-extensions = "*"
+compilers = "*"
+# cmake pinned <4: ROS 2 Humble's rosidl_generator_py (used to build the
+# optitrack_msgs interface package) relies on Python-finding cmake modules that
+# cmake 4 removed (policy CMP0148), breaking message generation.
+cmake = ">=3.16,<4"
+pkg-config = "*"
+make = "*"
+ninja = "*"
+git = "*"
+pip = "*"
+# Image handling in scripts/ (photo pipeline).
+pillow = ">=10"
+# notebooks/ — interactive 3D dataset visualization (camera poses vs insect).
+# nbformat: required by plotly's in-notebook mime renderer (fig.show()).
+plotly = "*"
+ipykernel = "*"
+nbformat = ">=4.2"
+# camera calibration (scripts/make_charuco_board.py, calibrate_intrinsics.py,
+# calibrate_handeye.py) — conda-forge build includes the aruco module.
+opencv = ">=4.8"
+# required by the vendored ETH-ASL hand_eye_calibration solver
+# (scripts/calibrate_handeye_eth.py; clone noted in that script's docstring)
+matplotlib = "*"
+
+[feature.optitrack.pypi-dependencies]
+# natnet_py: Jerome Guzzi's pure-Python NatNet client. Editable install from
+# src/ so the (one-line) patch in scripts/patch_natnet.py stays applied.
+natnet_py = { path = "src/natnet_py", editable = true }
+# Runtime dep of natnet_py — also pulled in transitively, listed here for clarity.
+netifaces = ">=0.11"
+# NB: optitrack_ros_py, optitrack_listener and the real optitrack_msgs package
+# are NOT listed here. They're ament ROS 2 packages; pip's editable install
+# would skip their data_files / message generation, so the ament_index would
+# have no record of them and `ros2 launch` couldn't find them. Instead they're
+# colcon-built via the implicit `build` task that `launch`/`record-poses`
+# depend on — data_files land in the right place.
+
+# ──────────────────────────────────────────────────────────────────────────
+# Feature: masking
+#   Separate environment for the background-masking experiments
+#   (scripts/mask_birefnet.py, mask_sam_geom.py, compare_masks.py).
+#   Kept out of the ROS env on purpose: torch/transformers churn must not
+#   re-solve the RoboStack stack. PyPI wheels (not conda) for the ML stack —
+#   much faster solve on osx-arm64, and torch wheels ship Metal (MPS) support.
+# ──────────────────────────────────────────────────────────────────────────
+[feature.masking.dependencies]
+python = "3.11.*"
+pip = "*"
+
+[feature.masking.pypi-dependencies]
+torch = ">=2.4"
+torchvision = "*"
+transformers = ">=4.44"
+# timm + einops + kornia: imported by BiRefNet's HF remote code
+timm = "*"
+einops = "*"
+kornia = "*"
+numpy = "*"
+pillow = ">=10"
+opencv-python-headless = "*"
+pyyaml = "*"
+scipy = "*"
+
+# COLMAP bindings for the mocap→SfM pose refinement
+# (scripts/refine_poses_colmap.py). osx-arm64 only: pycolmap ships no
+# linux-aarch64 wheel, and the refinement runs on the Mac anyway.
+[feature.masking.target.osx-arm64.pypi-dependencies]
+pycolmap = ">=3.10"
+
+[feature.masking.tasks.mask-birefnet]
+description = "Experiment 1: off-the-shelf BiRefNet background removal on a stack session's composites."
+cmd = "python scripts/mask_birefnet.py"
+
+[feature.masking.tasks.mask-sam-geom]
+description = "Experiment 2: SAM prompted from the fitted rig geometry (specimen projection + rod-excluding negative points)."
+cmd = "python scripts/mask_sam_geom.py"
+
+[feature.masking.tasks.mask-textprompt]
+description = "Experiment 3: language-prompted masks (OWLv2 text query 'a beetle' -> box -> SAM); the mac-runnable stand-in for LLMSeg-style reasoning segmentation."
+cmd = "python scripts/mask_textprompt.py"
+
+[feature.masking.tasks.mask-hybrid]
+description = "Hybrid mask: union of both experiments minus the geometrically projected rod/mount carve-out."
+cmd = "python scripts/mask_hybrid.py"
+
+[feature.masking.tasks.apply-masks]
+description = "Render the composites with the background replaced (white/black/alpha) using a chosen mask set."
+cmd = "python scripts/apply_masks.py"
+
+[feature.masking.tasks.compare-masks]
+description = "Compare two mask sets: IoU, disagreement maps, self-contained HTML report."
+cmd = "python scripts/compare_masks.py"
+
+[environments]
+default = { features = ["optitrack"] }
+masking = { features = ["masking"], no-default-feature = true }
+
+# Lab defaults for the OptiTrack driver. ROS_LOCALHOST_ONLY: all ROS nodes run
+# on this Mac (NatNet to the OptiTrack PC is plain UDP, not DDS). Off the lab
+# LAN, CycloneDDS binds the wrong interface and local nodes never discover each
+# other (empty bags, hanging `ros2 topic list`) — pinning DDS to loopback fixes
+# that everywhere.
+[feature.optitrack.activation.env]
+OPTITRACK_PC_IP = "192.168.201.5"
+# MY_IP is intentionally NOT set here: the launch files auto-detect the local
+# bind IP via a UDP connect() to the Motive PC (picks the right NIC even with
+# DHCP). Setting it here would override a user's `MY_IP=... pixi run ...` too,
+# because activation env wins over the inherited shell env.
+ROS_LOCALHOST_ONLY = "1"
+
+# ──────────────────────────────────────────────────────────────────────────
+# Tasks
+#   pixi run patch-natnet       — idempotent one-line fix to natnet_py
+#   pixi run build              — colcon build the ROS 2 workspace
+#   pixi run launch             — start driver + listener (no bag)
+#   pixi run record-poses       — driver + rosbag of all /optitrack/* poses,
+#                                 for an iPhone photo session (no sudo)
+#   pixi run record-mock        — same pipeline with a synthetic pose publisher
+#                                 (no hardware, no OptiTrack server)
+#   pixi run ms-clock           — millisecond clock display for the session
+#                                 clock photo
+#   pixi run match -- <session> — match photos/*.dng to poses → frames.csv
+#   pixi run make-board         — print-ready ChArUco calibration board PNG
+#   pixi run calibrate-intrinsics -- <folder> --square-mm <measured>
+#   pixi run calibrate-handeye  -- <session> [--clock-shows …]
+#   pixi run rviz-optitrack     — launch RViz with saved config
+# Full dataset procedure: RECORD_DATASET.md
+# ──────────────────────────────────────────────────────────────────────────
+[tasks.patch-natnet]
+description = "(implementation detail of `build`) idempotent natnet_py upstream fix."
+cmd = "python scripts/patch_natnet.py"
+
+[tasks.build]
+description = "(implementation detail of `launch`) colcon build the ROS 2 workspace."
+# The -DPython*_EXECUTABLE hints are needed by optitrack_msgs' message
+# generation: rosidl_generator_py runs FindPythonExtra before FindPython, which
+# leaves the modern find_package(Python) unable to locate the conda interpreter
+# on macOS unless the path is given explicitly. Harmless for the ament_python
+# packages, which ignore cmake args.
+cmd = "bash -c 'colcon build --cmake-args -DPython3_EXECUTABLE=\"$CONDA_PREFIX/bin/python\" -DPython_EXECUTABLE=\"$CONDA_PREFIX/bin/python\" -DPYTHON_EXECUTABLE=\"$CONDA_PREFIX/bin/python\"'"
+depends-on = ["patch-natnet"]
+
+[tasks.launch]
+description = "Run the OptiTrack driver + example listener (builds automatically if needed)."
+cmd = "bash -c 'source install/setup.bash && ros2 launch optitrack_listener optitrack.launch.py'"
+depends-on = ["build"]
+
+[tasks.record-poses]
+description = "Record all OptiTrack rigid-body poses to a rosbag for an iPhone photo session (no sudo)."
+cmd = "bash -c 'source install/setup.bash && ros2 launch optitrack_listener record.launch.py'"
+depends-on = ["build"]
+
+[tasks.record-mock]
+description = "Test the pose-recording pipeline with a synthetic pose publisher (no hardware, no sudo)."
+cmd = "bash -c 'source install/setup.bash && MOCK_RECORD=1 ros2 launch optitrack_listener record.launch.py'"
+depends-on = ["build"]
+
+[tasks.ms-clock]
+description = "Show a millisecond clock to photograph at session start/end (clock photo)."
+cmd = "python scripts/ms_clock.py"
+
+[tasks.match]
+description = "Match a session's photos to poses. Usage: pixi run match -- datasets/phone_<ts> --clock-shows HH:MM:SS.mmm [--bodies phone phone_mount popillia_mount]"
+cmd = "python scripts/match_photos.py"
+
+[tasks.make-board]
+description = "Generate a print-ready ChArUco calibration board PNG (see --help for sizes)."
+cmd = "python scripts/make_charuco_board.py"
+
+[tasks.calibrate-intrinsics]
+description = "Camera intrinsics from board photos. Usage: pixi run calibrate-intrinsics -- <folder> --square-mm <caliper-measured>"
+cmd = "python scripts/calibrate_intrinsics.py"
+
+[tasks.calibrate-handeye]
+description = "Hand-eye (phone body -> lens) from a handheld board session. Usage: pixi run calibrate-handeye -- datasets/phone_<ts> [--clock-shows HH:MM:SS.mmm ...]"
+cmd = "python scripts/calibrate_handeye.py"
+
+[tasks.calibrate-handeye-robot]
+description = "ROBOT hand-eye (link8 -> camera) from a board run: photos by order vs manual_poses CSV. Usage: pixi run calibrate-handeye-robot -- <photo_dir> --csv <manual_poses.csv>"
+cmd = "PYTHONPATH=scripts python scripts/calibrate_handeye_robot.py"
+
+[tasks.calibrate-handeye-eth]
+description = "Hand-eye via the ETH-ASL dual-quaternion solver (2nd opinion; needs vendor/ clone, see script docstring). Usage: pixi run calibrate-handeye-eth -- calibration/phone_<ts>"
+cmd = "python scripts/calibrate_handeye_eth.py"
+
+[tasks.dump-bodies]
+description = "Dump every rigid body's marker constellation from Motive to calibration/rigid_bodies.yaml (run in the lab)."
+cmd = "python scripts/dump_rigid_bodies.py"
+
+[tasks.rviz-optitrack]
+description = "Launch RViz with the saved Optitrack config."
+cmd = "rviz2 -d rviz/optitrack.rviz"
+
+[pypi-dependencies]
+rawpy = ">=0.27.1, <0.28"
+dtcwt = ">=0.14.0, <0.15"

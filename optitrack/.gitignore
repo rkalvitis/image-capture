@@ -1,0 +1,28 @@
+build/
+install/
+log/
+.pixi/
+*.pyc
+__pycache__/
+
+# pip build metadata
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# rosbag datasets (large binary files)
+datasets/
+.CLAUDE
+docs/
+photos/
+# local development-process journal (kept untracked by choice)
+thesis/
+3dprinter/
+# calibration session data: photos/bags are large, HTML views regenerable
+calibration/*/photos/
+calibration/*/bag/
+calibration/*.html
+calibration/*/*.html
+# vendor/ holds pinned git submodules (ethz-asl/hand_eye_calibration) —
+# tracked, not ignored, so the exact upstream commit is recorded

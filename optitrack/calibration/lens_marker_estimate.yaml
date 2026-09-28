@@ -1,0 +1,12 @@
+date: '2026-07-16T12:21:59'
+method: marker ball on the ultra-wide lens ring (temporarily added to the phone body)
+marker_name: marker_6
+ball_diameter_mm: 20.0
+pupil_depth_mm: 2.0
+lens_position_m:
+- -0.007337998412313743
+- -0.03028499652310916
+- 0.06889574856755738
+sigma_mm:
+  lateral: 1.0
+  axial: 2.0

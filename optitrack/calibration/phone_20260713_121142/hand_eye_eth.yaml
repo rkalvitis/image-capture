@@ -1,0 +1,18 @@
+solver: ethz-asl/hand_eye_calibration (dual quaternion, RANSAC)
+session: calibration/phone_20260713_121142
+intrinsics_file: calibration/phone_20260713_121142/intrinsics.yaml
+camera_in_body:
+  translation_m:
+  - -0.017755678515664303
+  - -0.029968370300618507
+  - 0.06690514386748585
+  quaternion_xyzw:
+  - 0.020972540896778826
+  - 0.5635786562886055
+  - 0.054671774065700104
+  - 0.8239843735319086
+n_pairs: 12
+n_inliers: 9
+rmse:
+  position: 0.008538630784526999
+  orientation: 3.0161870836636115

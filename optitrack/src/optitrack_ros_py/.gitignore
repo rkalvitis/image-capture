@@ -1,0 +1,11 @@
+playground
+private
+*_cache
+__pycache__
+.DS_Store
+docs/make.bat
+docs/Makefile
+mypy.ini
+ruff.toml
+.doctrees
+.buildinfo
