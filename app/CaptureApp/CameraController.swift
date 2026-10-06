@@ -269,6 +269,7 @@ final class CameraController: NSObject {
                     if k == 0 { log("thermal serious — 3 s pause between frames") }
                     Thread.sleep(forTimeInterval: 3)
                 }
+                let thermalNow = AppState.thermalName()      // per frame: the state can change inside a 50-frame stack
                 let applied = try setLensPosition(lp, settleMs: settleMs)
                 let settings = AVCapturePhotoSettings(rawPixelFormatType: raw)
                 settings.photoQualityPrioritization = qualityPrioritization
@@ -322,12 +323,12 @@ final class CameraController: NSObject {
                     "exif": ["ExposureTime": exif["ExposureTime"] as Any, "ISOSpeedRatings": exif["ISOSpeedRatings"] as Any,
                              "DateTimeOriginal": exif["DateTimeOriginal"] as Any, "SubsecTimeOriginal": exif["SubsecTimeOriginal"] as Any],
                     "device": UIDevice.current.model + " " + UIDevice.current.systemVersion, "lens": "ultra-wide",
-                    "thermal": thermal,
+                    "thermal": thermalNow, "thermal_at_start": thermal,
                 ]
                 try store.write(session: session, name: name, dng: data, sidecar: sidecar)
                 let frame: [String: Any] = ["k": k, "file": name + ".dng", "capture_time": captureTime,
                                             "lens_position": applied, "intrinsics": intrinsics as Any,
-                                            "exposure": sidecar["exposure"]!, "thermal": thermal]
+                                            "exposure": sidecar["exposure"]!, "thermal": thermalNow]
                 onFrame(frame)
                 frames.append(frame)
             } catch {

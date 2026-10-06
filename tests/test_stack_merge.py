@@ -82,6 +82,34 @@ class StackMerge(unittest.TestCase):
         # rerun is a no-op (already merged)
         sm.merge_session(tmp, ref, fmt="png", log=lambda *a: None)
 
+    def test_sam3_mask_falls_back_to_threshold(self):
+        from capture_coordinator import stack_merge as sm
+        tmp = tempfile.mkdtemp(prefix="merge_")
+        make_session(tmp, n=5, stops=(0,))
+        sm.merge_session(tmp, -1, fmt="jpg", align="intrinsics", mask="sam3", sam3_python="/nonexistent/python",
+                         log=lambda *a: None)
+        m = list(csv.DictReader(open(os.path.join(tmp, "merged", "merged_frames.csv"))))
+        self.assertEqual(m[0]["mask_method"], "sam3(failed->threshold)")      # merged anyway, with the fast mask
+
+    def test_depth_guard(self):
+        from capture_coordinator import stack_merge as sm
+        # next to an edge the DEFOCUSED photo has the most energy; the depth map must still say "the sharp photo"
+        sharp = np.zeros((80, 120), np.float32); sharp[:, 60:] = 1.0
+        grays = {0: sharp, 1: cv2.GaussianBlur(sharp, (0, 0), 5.0)}
+        e = {k: np.abs(cv2.Laplacian(g, cv2.CV_32F, ksize=3)) for k, g in grays.items()}
+        self.assertGreater(e[1][40, 66], e[0][40, 66])                        # the halo the guard exists for
+        depth, known = sm.focus_depth_map(grays, {0: np.eye(3), 1: np.eye(3)}, 0, 1.0)
+        self.assertTrue(known[40, 66])
+        self.assertLess(float(depth[40, 54:67].max()), 0.5)
+        # a guarded merge still beats every input frame
+        tmp = tempfile.mkdtemp(prefix="merge_")
+        synth, rows = make_session(tmp, n=7)
+        best = max(synth.sharpness(cv2.imread(os.path.join(tmp, "images", r["file"]))) for r in rows)
+        for out, space in (("guard_linear", "linear"), ("guard_srgb", "srgb")):      # same for both fusion spaces
+            sm.merge_session(tmp, 3, out_name=out, fmt="png", depth_guard=1, fusion_space=space, log=lambda *a: None)
+            merged = cv2.imread(os.path.join(tmp, out, "MERGED_0000.png"))
+            self.assertGreater(synth.sharpness(merged), best * 1.05, space)
+
     def test_intrinsics_only_and_delete_raw(self):
         from capture_coordinator import stack_merge as sm
         tmp = tempfile.mkdtemp(prefix="merge_")

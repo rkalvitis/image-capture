@@ -1,8 +1,9 @@
 """The session state machine (docs/DEVELOPMENT_PLAN.md §6).
 
-for turntable step s:                       (outer loop, manual platter)
+for turntable step s:                       (outer loop: manual platter, or the motor of hardware/turntable/)
   robot run starts -> reached(0)            initial pose = turntable moment
   TURN    Enter and/or popillia yaw == target ± tol and still       -> go(0)
+          (motor: Enter once to place the insect, then GOTO s*step_deg, optional yaw gate)
   (step 0 only, optional) EXPOSURE CHECK: one test frame, statistics, EV to apply
   for pose k in 1..N:
     MOVE   wait reached(k)
@@ -11,15 +12,26 @@ for turntable step s:                       (outer loop, manual platter)
     VERIFY still over the capture interval; files pulled; count ok
            fail -> retry (max_retries) -> ask operator: retry / skip / abort
     MERGE  (background) fuse the stack, delete the Mac copies of the raw frames
+    UPLOAD (background, plan upload_remote) the raw stack goes to OneDrive right after the pull
+           (parallel to the merge), the master after the merge; rclone copy + check, then delete the
+           local / phone copies (upload_delete_local / upload_delete_phone) — docs/ONEDRIVE.md
     go(k)
   robot returns -> done
-end: wait for the merges, Enter, stop the mocap recording and the tunnel
+end: wait for the merges and uploads, Enter, stop the mocap recording and the tunnel
+
+At start the command asks (Enter = the plan's value): the session folder, the OneDrive
+destination and the number of insect rotations (the step becomes exactly 360/N deg);
+--no-ask / --auto-operator take the plan as it is, --session-dir / --remote / --rotations override.
 
 Run it with the optitrack pixi env python for the ROS 2 mocap source:
   bash tools/run_coordinator.sh --plan coordinator/plan.sep15.yaml   [--resume] [--start-step N]
 """
 import argparse
+import collections
 import json
+import platform
+import socket
+import subprocess
 import os
 import queue
 import signal
@@ -34,8 +46,12 @@ from .mocap import yaw_deg, yaw_diff_deg
 from .phone import PhoneClient
 from .poses import fmt_vec, insect_from_cam, load_rig, mat_quat
 from .plan import Plan
+from .poses_collect import collect_poses
 from .robot import RobotClient
 from .session import SessionWriter
+from .summary import write_summary
+from .turntable import TurntableError
+from .upload_worker import UploadWorker
 
 
 class Abort(Exception):
@@ -76,11 +92,17 @@ class Progress:
 
 class Coordinator:
     def __init__(self, plan, phone, robot_factory, mocap, puller, writer,
-                 operator=None, on_turntable_prompt=None, log=print, start_step=0):
+                 operator=None, on_turntable_prompt=None, log=print, start_step=0, turntable=None):
         self.plan, self.phone, self.robot_factory = plan, phone, robot_factory
         self.mocap, self.puller, self.writer = mocap, puller, writer
         self.operator = operator or self._ask_operator
         self.on_turntable_prompt = on_turntable_prompt
+        self.turntable = turntable                                   # None = manual platter (Enter)
+        self._tt_started = False                                     # first rotation of this run done (position set)
+        self._tt_yaw_sign = None                                     # +1/-1: sense of the popillia yaw per motor degree
+        self._tt_at_zero = False                                     # rotations-per-pose: platter known to sit at step 0
+        self._pre_turn = None                                        # (step, thread, result) of a motor move started early
+        self._exposure_checked = False
         self.log = log
         self.start_step = int(start_step)
         self.stop_id = writer.max_stop + 1 if writer.resumed else 0
@@ -96,29 +118,44 @@ class Coordinator:
         self._final_thr = threading.Thread(target=self._finalize_loop, daemon=True, name="finalize")
         self._final_thr.start()
         self._moved_t = 0.0                                          # time of the last movement (robot reached / insect turned)
+        self._thermal_last = "nominal"                               # worst thermal state reported in the last stack
+        self._t_session = time.time()                                # robot run files older than this are not ours
         self.stats = {"stops_ok": 0, "retries": 0, "skipped": 0, "already_done": 0}
         self.focus_table = plan.load_focus_table()
         if self.focus_table:
             self.log(f"focus table: {sum(len(v) for v in self.focus_table.values())} entries for poses "
                      f"{sorted(self.focus_table)} from {plan.focus_table}")
         self.T_body_cam = None
-        if plan.rig_transforms:
+        if plan.rig_transforms and os.path.exists(plan.rig_transforms):
             self.T_body_cam = load_rig(plan.rig_transforms)
             self.log(f"camera poses: T_body<-cam from {plan.rig_transforms}")
+        elif plan.rig_transforms:
+            self.log(f"WARNING rig_transforms not found: {plan.rig_transforms} -> no cam_* columns; "
+                     f"compute them later with colmap_export.py --rig")
         self.progress = Progress(out=sys.stdout) if log is print else Progress(out=open(os.devnull, "w"))
         self.progress.total_stacks = plan.turntable_steps * (plan.poses + (1 if plan.shoot_initial_pose else 0))
         self.progress.done_stacks = len(writer.done)
         if writer.resumed:
             self.log(f"RESUME: {len(writer.done)} stops already captured, next stop id {self.stop_id}, "
                      f"starting at turntable step {self.start_step}" + (f", yaw0 {self.yaw0:.2f}" if self.yaw0 is not None else ""))
+        self.uploader = None
+        self._stop_files = {}                                        # stop -> (image, phone file names) for the upload
+        if plan.upload_remote:
+            self.uploader = UploadWorker(writer.dir, plan.upload_remote, what=plan.upload_what,
+                                         delete_local=plan.upload_delete_local, delete_phone=plan.upload_delete_phone,
+                                         puller=puller, phone_session=writer.session_id, rclone=plan.upload_rclone,
+                                         transfers=plan.upload_transfers, bwlimit=plan.upload_bwlimit,
+                                         timeout_s=plan.upload_timeout_s, log=self.log, event=writer.event)
+            self.log(f"upload: {plan.upload_what} -> {plan.upload_remote} after every stop; delete local = "
+                     f"{plan.upload_delete_local}, delete on the phone = {plan.upload_delete_phone}")
         self.merger = None
         if plan.merge_inline:
-            extra = ["--fusion", plan.merge_fusion, "--format", plan.merge_format]
+            extra = ["--fusion", plan.merge_fusion, "--format", plan.merge_format, "--mask", plan.merge_mask]
             if plan.merge_index_maps:
                 extra.append("--index-maps")
             self.merger = MergeWorker(writer.dir, plan.merge_ref(), python=plan.merge_python or None,
                                       delete_raw=plan.merge_delete_raw, log=self.log, extra_args=extra,
-                                      jobs=plan.merge_jobs)
+                                      jobs=plan.merge_jobs, on_done=self._on_merge_done if self.uploader else None)
             self.log(f"inline merge: {plan.merge_fusion} fusion, {plan.merge_format}, {plan.merge_jobs} job(s), "
                      f"ref index {plan.merge_ref()}, delete raw on the Mac = {plan.merge_delete_raw}")
 
@@ -160,8 +197,21 @@ class Coordinator:
 
     def status_line(self):
         pend = self.merger.pending if self.merger else 0
+        up = f", uploads pending {self.uploader.pending}" if self.uploader else ""
         return (f"stops ok {self.stats['stops_ok']}, next stop id {self.stop_id}, step {getattr(self, '_current_step', '-')}, "
-                f"pulls pending {self._final_pending}, merges pending {pend}" + (", PAUSE requested" if self.pause_requested else ""))
+                f"pulls pending {self._final_pending}, merges pending {pend}{up}" + (", PAUSE requested" if self.pause_requested else ""))
+
+    def _on_merge_done(self, stop, ok):
+        """MergeWorker callback (merge thread): hand the stop to the upload worker."""
+        image, names = self._stop_files.get(stop, (None, []))
+        if image is None:
+            self.log(f"[upload] stop {stop}: no image name recorded — not uploaded")
+            return
+        self.uploader.submit(stop, image, names, merged_ok=ok)
+
+    def _buffer_pending(self):
+        """Stops whose files are still on this disk waiting for the merge and/or the upload."""
+        return (self.merger.pending if self.merger else 0) + (self.uploader.pending if self.uploader else 0)
 
     # -- background finalize (pull + rows + merge hand-off) ------------------
     def _finalize_async(self, pend):
@@ -235,15 +285,21 @@ class Coordinator:
         power = {"raw": p.phone_raw or None, "quality": p.phone_quality or None,
                  "frame_rate": p.phone_frame_rate or None,
                  "screen_brightness": p.phone_screen_brightness if p.phone_screen_brightness >= 0 else None,
-                 "preview": p.phone_preview}
+                 "preview": p.phone_preview, "blackout": True if p.phone_blackout else None}
         return self.phone.hello(session=self.writer.session_id, lens_positions=p.lens_for_pose(1), settle_ms=p.settle_ms,
                                 exposure=self._exposure_dict(), wb=p.wb, power=power)
 
     def run(self):
         p = self.plan
         self.writer.event("session_start", session=self.writer.session_id, plan=p.name, resumed=self.writer.resumed,
-                          start_step=self.start_step)
+                          start_step=self.start_step, loop_order=p.loop_order, host=socket.gethostname(),
+                          platform=platform.platform(), coordinator_commit=repo_commit(),
+                          turntable_drive=self.turntable.drive if self.turntable is not None else "manual")
         self.phone.connect()
+        if self.turntable is not None:
+            info = self.turntable.connect()
+            self.log(f"[turntable] {self.turntable.drive}: {info}")
+            self.writer.event("turntable_ready", drive=self.turntable.drive, **info)
         ready = self._hello()
         offset = self.phone.ping()
         self.log(f"[phone] ready: {ready.get('device')} {ready.get('lens')} {ready.get('format')} "
@@ -251,8 +307,15 @@ class Coordinator:
                  f"clock offset {offset*1000:.1f} ms; calib {ready.get('calib_available')}")
         self.writer.event("phone_ready", reply=ready, clock_offset_s=offset, exposure=self._exposure_dict())
         try:
-            for step in range(self.start_step, p.turntable_steps):
-                self._turntable_step(step)
+            if p.loop_order == "rotations-per-pose":
+                self._pose_outer_run()
+            else:
+                for step in range(self.start_step, p.turntable_steps):
+                    self._turntable_step(step)
+                if p.turntable_steps > 1 and (self.turntable is not None and self._tt_started):
+                    self._turntable_return("session")        # undo the revolution backwards (thread height)
+                elif p.turntable_steps > 1 and self.turntable is None:
+                    self._turntable_return("session")        # manual platter: one Enter after turning it back
         except (Abort, KeyboardInterrupt):
             self.log("session aborted by the operator")
             self.writer.event("session_abort", stats=self.stats)
@@ -261,15 +324,46 @@ class Coordinator:
         finally:
             self._drain_finalize()                       # every captured stop pulled and recorded
             self.phone.close()
+            if self.turntable is not None:
+                self.turntable.close()
             if self.merger:
                 self.log("waiting for the background merges to finish...")
                 self.merger.drain()
                 self.stats.update(self.merger.summary())
                 self.writer.event("merge_done", **self.merger.summary())
                 self.merger.close()
+            if self.uploader:
+                self.log("waiting for the background uploads to finish...")
+                self.uploader.drain()
+                self.stats.update(self.uploader.summary())
+                self.writer.event("upload_done", **self.uploader.summary())
+            self._write_summary(final=True)                # session.jsonl is flushed per event: complete already
+            self._collect_poses()
+            if self.uploader:
+                ok = self.uploader.upload_session_files(final=False)     # mocap/ follows in main() once the bag is closed
+                self.log(f"session files -> {self.plan.upload_remote}: {'ok' if ok else 'FAILED (see above)'}")
+                self.uploader.close()
             self.writer.close()
         self.log(f"session {self.writer.session_id} finished: {self.stats}")
         return self.stats
+
+    def _collect_poses(self):
+        """<session>/poses/: stops.csv, turntable.csv, robot_poses.csv, mocap/<image>.csv and the robot
+        script's own run files (plan poses_collect globs) — after every stop and at the end."""
+        try:
+            collect_poses(self.writer.dir, self.plan.poses_collect, since=self._t_session, log=self.log)
+        except Exception as e:                       # never let the bookkeeping stop a session
+            self.log(f"WARNING poses/ not collected: {e}")
+
+    def _write_summary(self, final=False):
+        """<session>/summary.json + SUMMARY.md (rewritten after every stop, final at the end)."""
+        try:
+            paths = write_summary(self.writer.dir, extra={"stats": dict(self.stats), "final": final,
+                                                          "plan": self.plan.to_dict()})
+            if final:
+                self.log(f"summary: {paths[1]}")
+        except Exception as e:                       # never let the bookkeeping stop a session
+            self.log(f"WARNING summary not written: {e}")
 
     # -- one turntable step = one robot run ----------------------------
     def _turntable_step(self, step):
@@ -288,7 +382,8 @@ class Coordinator:
         self.writer.event("robot_initial", step=step, joints=msg.get("joints"))
         self._wait_turntable(step)
         self._moved_t = time.time()                      # the insect was just turned / placed
-        if step == 0 and p.exposure_check and not self.exposure:
+        if step == 0 and p.exposure_check and not self.exposure and not self._exposure_checked:
+            self._exposure_checked = True
             self._exposure_check(step, 0 if p.shoot_initial_pose else 1)
         try:
             pending = None
@@ -314,6 +409,8 @@ class Coordinator:
                 self._check_pause(f"step {step} pose {k}, arm holding")
                 robot.go(k)
                 self._finalize_async(pending)
+                if k == n_poses:
+                    self._start_pre_turn(step + 1)       # motor: turn NOW, while the arm goes home (user, 2026-09-30)
             robot.wait_done()
             self.writer.event("robot_done", step=step)
         except (Abort, KeyboardInterrupt):
@@ -326,6 +423,101 @@ class Coordinator:
         finally:
             robot.close()
 
+    # -- loop_order rotations-per-pose: one robot run, all rotations at every pose ---------
+    def _pose_outer_run(self):
+        p = self.plan
+        if self.start_step:
+            self.log(f"NOTE: --start-step {self.start_step} is ignored with loop_order rotations-per-pose "
+                     f"(finished stops are skipped instead)")
+        robot = self.robot_factory()
+        self.log(f"waiting for the robot run to start (port {p.robot_port}): one run, "
+                 f"{p.turntable_steps} rotations at every pose...")
+        robot.connect()
+        if robot.poses and robot.poses != p.poses:
+            self.log(f"WARNING: robot has {robot.poses} poses, plan says {p.poses} — using the robot's count")
+        n_poses = robot.poses or p.poses
+        msg = robot.wait_reached()
+        if msg.get("type") != "reached" or int(msg.get("id", -1)) != 0:
+            raise RuntimeError(f"expected reached 0 from the robot, got {msg}")
+        self._moved_t = time.time()
+        self.writer.event("robot_initial", step=0, joints=msg.get("joints"))
+        self._wait_turntable(0)                          # Enter: insect placed, platter at step 0 (motor: SETPOS 0)
+        self._tt_at_zero = True
+        self._moved_t = time.time()
+        if p.exposure_check and not self.exposure and not self._exposure_checked:
+            self._exposure_checked = True
+            self._exposure_check(0, 0 if p.shoot_initial_pose else 1)
+        try:
+            if p.shoot_initial_pose:
+                self._rotations_at_pose(0, msg.get("joints"))
+            self._check_pause("pose 0, arm holding")
+            robot.go(0)
+            for k in range(1, n_poses + 1):
+                msg = robot.wait_reached()
+                if msg.get("type") == "done":
+                    raise RuntimeError("robot finished the run early")
+                if int(msg["id"]) != k:
+                    self.log(f"WARNING: robot reached {msg['id']}, expected {k}")
+                    k = int(msg["id"])
+                self._moved_t = time.time()
+                self.writer.event("robot_reached", step=0, pose=k, joints=msg.get("joints"))
+                self._rotations_at_pose(k, msg.get("joints"))
+                self._check_pause(f"pose {k}, arm holding")
+                robot.go(k)
+            robot.wait_done()
+            self.writer.event("robot_done", step=0)
+        except (Abort, KeyboardInterrupt):
+            robot.abort()
+            try:
+                robot.wait_done(timeout=120)
+            except Exception:
+                pass
+            raise
+        finally:
+            robot.close()
+
+    def _rotations_at_pose(self, k, joints):
+        """All turntable steps at robot pose k (arm holding), then the platter goes BACK to step 0."""
+        p = self.plan
+        moved = False
+        for step in range(p.turntable_steps):
+            self._current_step = step
+            if (step, k) in self.writer.done:
+                self._stop_or_skip(step, k)              # logs stop_already_done; the platter is not moved for it
+                continue
+            if not (step == 0 and self._tt_at_zero):
+                self._wait_turntable(step)
+                self._moved_t = time.time()
+                self._tt_at_zero = (step == 0)
+                moved = moved or step != 0
+            self.writer.robot_pose(step, k, self.stop_id, self.writer.stack_name(step, k), joints)
+            self._check_pause(f"pose {k} step {step}, before the stack")
+            pending = self._stop_or_skip(step, k)
+            self._finalize_async(pending)                # pull in the background while the platter turns
+        if moved or not self._tt_at_zero:
+            self._turntable_return(k)
+
+    def _turntable_return(self, k):
+        """Reverse the platter to step 0 (never a full turn forward: the insect sits on a thread
+        and would creep in height over many revolutions). Called before the arm leaves pose k
+        (rotations-per-pose) and, with k = "session", after the last rotation of a
+        poses-per-rotation session (user, 2026-09-30: every full revolution is undone backwards)."""
+        label = f"pose {k}" if not isinstance(k, str) else k
+        if self.turntable is not None:
+            self.log(f"[{label}] platter returning to step 0 (reverse)...")
+            info = self._tt_call(lambda: self.turntable.goto(0.0), "GOTO 0 (return)")
+            self.log(f"[{label}] platter back at {info.get('pos_deg', 0.0):.3f} deg ({info.get('move_s', 0):.1f} s)")
+            self.writer.event("turntable_return", pose=k, drive=self.turntable.drive, yaw=self._popillia_yaw(), **info)
+        else:
+            what = f"Pose {k} done" if not isinstance(k, str) else "All rotations done"
+            ans = self._ask(f"\n>>> {what}. Turn the insect BACK to step 0 (reverse, the same way back), then press Enter",
+                            ["enter", "abort"], "All rotations done. Turn the insect back to the start, then press Enter.")
+            if ans == "abort":
+                raise Abort()
+            self.writer.event("turntable_return", pose=k, drive="manual", confirmed="enter", yaw=self._popillia_yaw())
+        self._tt_at_zero = True
+        self._moved_t = time.time()
+
     def _stop_or_skip(self, step, k):
         """Capture the stop (with retries); returns the pending capture for _finalize, or None."""
         if (step, k) in self.writer.done:
@@ -335,7 +527,37 @@ class Coordinator:
             return None
         return self._stop(step, k)
 
+    def _start_pre_turn(self, step):
+        """poses-per-rotation with the motor: the platter move for `step` starts in the background
+        as soon as the last stack of the previous rotation is shot; `_wait_turntable(step)`
+        then only joins it (the 10 s settle counts from the end of the move)."""
+        p = self.plan
+        if self.turntable is None or not self._tt_started or step >= p.turntable_steps:
+            return
+        result = {}
+
+        def run():
+            try:
+                self._motor_turntable(step)
+                result["ok"] = True
+            except BaseException as e:                   # Abort / TurntableError -> re-raised by the join
+                result["error"] = e
+        t = threading.Thread(target=run, daemon=True, name=f"pre-turn-{step}")
+        t.start()
+        self._pre_turn = (step, t, result)
+        self.writer.event("turntable_early", step=step)
+        self.log(f"[step {step}] platter turning while the arm returns (early move)")
+
     def _wait_turntable(self, step):
+        if self._pre_turn is not None and self._pre_turn[0] == step:
+            _s, t, result = self._pre_turn
+            self._pre_turn = None
+            t.join()
+            if "error" in result:
+                raise result["error"]
+            return
+        if self.turntable is not None:
+            return self._motor_turntable(step)
         p = self.plan
         thr = self._thresholds()
         if p.turntable_confirm in ("enter", "both") or not self.mocap.enabled:
@@ -402,6 +624,99 @@ class Coordinator:
             if ans == "abort":
                 raise Abort()
 
+    def _popillia_yaw(self):
+        last = self.mocap.latest("popillia") if self.mocap.enabled else None
+        return yaw_deg(last[2]) if last else None
+
+    def _motor_turntable(self, step):
+        """Motorised platter: no operator input at all — the platter is zeroed at the first step
+        (the insect was placed before the run), then absolute GOTO per step; `turntable_confirm` mocap|both waits (bounded) for the popillia
+        yaw to reach the expected value and RECORDS the outcome — it never asks the operator."""
+        p = self.plan
+        target_deg = step * p.turntable_step_deg
+        if not self._tt_started:
+            # no prompt (user, 2026-09-30): the insect is placed before the run starts; the platter's current
+            # position becomes stop `step` (ZERO) the moment the robot reaches its initial pose
+            info = self._tt_call(lambda: self.turntable.set_position(target_deg), f"SETPOS {target_deg:g}")
+            self._tt_started = True
+            yaw = self._popillia_yaw()
+            if self.yaw0 is None and yaw is not None:
+                self.yaw0 = yaw
+            self.log(f"[step {step}] platter position set to {target_deg:g} deg (no prompt)"
+                     + (f", popillia yaw {yaw:.2f}" if yaw is not None else ""))
+            self.writer.event("turntable", step=step, yaw=yaw, target_yaw=(self.yaw0 + step * p.turntable_step_deg)
+                              if self.yaw0 is not None else None, confirmed="auto", drive=self.turntable.drive,
+                              commanded_deg=target_deg, **info)
+            return
+        yaw_before = self._popillia_yaw()
+        while True:
+            self.log(f"[step {step}] turning the platter to {target_deg:g} deg...")
+            info = self._tt_call(lambda: self.turntable.goto(target_deg), f"GOTO {target_deg:g}")
+            self._moved_t = time.time()
+            self.log(f"[step {step}] platter at {info.get('pos_deg', target_deg):.3f} deg ({info.get('move_s', 0):.1f} s)")
+            gate = p.turntable_confirm in ("mocap", "both") and self.mocap.enabled
+            expect = None
+            if self.yaw0 is not None:
+                if self._tt_yaw_sign is None and yaw_before is not None:
+                    # learn the sense of the yaw per platter degree from this first move
+                    time.sleep(min(1.0, max(0.2, p.still_window_s)))
+                    y = self._popillia_yaw()
+                    if y is not None:
+                        d = yaw_diff_deg(y, yaw_before)
+                        if abs(d) > p.turntable_yaw_tol_deg:
+                            self._tt_yaw_sign = 1 if d > 0 else -1
+                            self.log(f"[step {step}] popillia yaw moved {d:+.2f} deg for +{p.turntable_step_deg:g} platter deg "
+                                     f"-> yaw sign {self._tt_yaw_sign:+d}")
+                if self.on_turntable_prompt and not gate:
+                    self.on_turntable_prompt(step, self.yaw0 + (self._tt_yaw_sign or 1) * target_deg)
+                expect = self.yaw0 + (self._tt_yaw_sign or 1) * target_deg
+            if self.on_turntable_prompt and gate:
+                self.on_turntable_prompt(step, expect if expect is not None else target_deg)
+            if not gate:
+                yaw = self._popillia_yaw()
+                self.writer.event("turntable", step=step, yaw=yaw, target_yaw=expect, confirmed="motor",
+                                  drive=self.turntable.drive, commanded_deg=target_deg, **info)
+                return
+            # yaw gate (mocap | both): the insect body must sit at the expected yaw and be still
+            thr = self._thresholds()
+            t0 = time.time()
+            yaw, still, j = None, False, None
+            while time.time() - t0 < max(15.0, p.still_timeout_s):
+                yaw = self._popillia_yaw()
+                still, j = self.mocap.is_still(thr, p.still_window_s)
+                if not p.stillness_gate:
+                    last = self.mocap.latest("popillia")
+                    still = last is not None and time.time() - last[0] < 0.5
+                if yaw is not None and expect is not None and abs(yaw_diff_deg(yaw, expect)) <= p.turntable_yaw_tol_deg and still:
+                    self.log(f"[step {step}] turntable at yaw {yaw:.2f} deg (expected {expect:.1f}), still {j}")
+                    self.writer.event("turntable", step=step, target_yaw=expect, yaw=yaw, jitter=j, confirmed="motor+mocap",
+                                      drive=self.turntable.drive, commanded_deg=target_deg, **info)
+                    return
+                time.sleep(0.1)
+            # the motor did the rotation: never stop to ask (user, 2026-09-30) — the yaw is recorded as it is
+            self.log(f"[step {step}] WARNING popillia yaw {None if yaw is None else round(yaw, 2)} deg, expected "
+                     f"{None if expect is None else round(expect, 1)} (still {still}) — continuing, recorded as is")
+            self.writer.event("turntable", step=step, target_yaw=expect, yaw=yaw, jitter=j, accepted=True, auto=True,
+                              drive=self.turntable.drive, commanded_deg=target_deg, **info)
+            return
+
+    def _tt_call(self, fn, what):
+        """Run a turntable command; on a serial error ask retry / abort (never silently continue)."""
+        while True:
+            try:
+                return fn() or {}
+            except TurntableError as e:
+                self.log(f"[turntable] ERROR {what}: {e}")
+                self.writer.event("turntable_error", command=what, error=str(e))
+                ans = self._ask(f"turntable {what} failed: {e}. Check the USB/board/power, then",
+                                ["retry", "abort"], "Turntable error. Check the board.")
+                if ans == "abort":
+                    raise Abort()
+                try:
+                    self.turntable.close(); self.turntable.connect()
+                except TurntableError as e2:
+                    self.log(f"[turntable] reconnect failed: {e2}")
+
     # -- exposure check (step 0) ---------------------------------------
     def _exposure_check(self, step, k):
         """One test frame at the first stop's init focus; print the statistics
@@ -409,7 +724,7 @@ class Coordinator:
         the operator accepts (Enter with 0 / 'keep')."""
         p = self.plan
         try:
-            from .exposure import apply_ev, exposure_stats, format_stats
+            from .exposure import apply_ev, auto_ev, exposure_stats, format_stats
             from .stack_merge import decode_dng
         except ImportError as err:
             self.log(f"exposure check skipped (needs opencv/rawpy: {err})")
@@ -419,7 +734,8 @@ class Coordinator:
         else:
             centre, source = p.init_focus(k), p.focus_mode
         out_dir = os.path.join(self.writer.dir, "exposure_check")
-        suggest = float(p.exposure_check_ev)
+        auto = p.exposure_check_ev == "auto"
+        suggest = 0.0 if auto else float(p.exposure_check_ev)
         n = 0
         while True:
             n += 1
@@ -439,8 +755,11 @@ class Coordinator:
             self.log(f"\n[exposure check {n}] test frame {f['file']} at lens {centre:.4f} ({source}): "
                      f"1/{1.0 / max(float(exp.get('duration_s', 0.01)), 1e-6):.0f} s, ISO {float(exp.get('iso', 0)):.0f}")
             self.log(format_stats(st))
+            if auto and n == 1:
+                suggest = auto_ev(st)
+                self.log(f"  auto: {suggest:+.1f} EV puts the white foam (frame p99) at 0.85 sRGB")
             self.writer.event("exposure_check", n=n, file=f["file"], exposure=exp, stats={kk: v for kk, v in st.items() if kk != "rows"},
-                              rows=st["rows"])
+                              rows=st["rows"], suggested_ev=suggest)
             ans = self._ask(f">>> EV to apply on top of this exposure (Enter = {suggest:+.1f}, 0 = keep as is, "
                             f"or type a value)", ["enter", "ev", "keep", "abort"], "Exposure check: choose the EV.")
             if ans == "abort":
@@ -500,6 +819,41 @@ class Coordinator:
             time.sleep(remaining)
             self.writer.event("settled", stop=self.stop_id, waited_s=round(remaining, 2))
 
+    def _thermal_wait(self):
+        """plan thermal_wait_s: before every stack ask the phone for its thermal state; if it is
+        serious/critical, idle (poll every 5 s, up to thermal_wait_s) until it is fair/nominal again.
+        Idle cooling is cheaper than the app's in-stack throttle (3 s per frame = 200 s stacks)."""
+        max_s = float(self.plan.thermal_wait_s)
+        if max_s <= 0:
+            return
+        try:
+            st = self.phone.status()
+            state = str(st.get("thermal", self._thermal_last))
+        except Exception:                                # noqa: BLE001
+            return
+        # one status per stop -> thermal + battery in the log (iOS suspends charging when hot: the battery
+        # fell 90 -> 80 % in the 16-stack bench of 2026-09-30 although the cable was connected)
+        self.writer.event("phone_status", stop=self.stop_id, thermal=state, battery=st.get("battery"),
+                          charging=st.get("charging"), free_bytes=st.get("free_bytes"))
+        before = state
+        if state not in ("serious", "critical"):
+            self._thermal_last = state
+            return
+        t0 = time.time()
+        self.log(f"[stop {self.stop_id}] phone thermal {state} -> cooling before the stack (up to {max_s:.0f} s)...")
+        while time.time() - t0 < max_s:
+            time.sleep(5.0)
+            try:
+                state = str(self.phone.status().get("thermal", state))
+            except Exception:                            # noqa: BLE001
+                break
+            if state not in ("serious", "critical"):
+                break
+        waited = time.time() - t0
+        self.log(f"[stop {self.stop_id}] thermal now {state} after {waited:.0f} s")
+        self.writer.event("thermal_wait", stop=self.stop_id, before=before, after=state, waited_s=round(waited, 1))
+        self._thermal_last = state
+
     def _focus_from_table(self, k):
         """Stack centre for robot pose k from the focus table: the entry with the
         nearest popillia yaw (mocap now); falls back to the pose median / plan value."""
@@ -547,6 +901,7 @@ class Coordinator:
         source = p.focus_mode
         # SETTLE: a fixed minimum idle time after the last movement (the arm's move swings the popillia)
         self._settle_after_move()
+        self._thermal_wait()                                         # plan thermal_wait_s (after a hot stack)
         # STILL (only with stillness_gate; otherwise the jitter is logged and nothing waits or fails)
         if p.stillness_gate:
             ok, j, waited = self.mocap.wait_still(thr, p.still_window_s, p.still_timeout_s)
@@ -615,7 +970,12 @@ class Coordinator:
             for b, thr_mm in thr.items():
                 if jitters[b] is None or jitters[b] > thr_mm:
                     raise RuntimeError(f"moved during capture: {jitters}")
-        self.writer.event("captured", stop=self.stop_id, step=step, pose=k, image=image, n=len(frames), jitter=jitters)
+        thermal = collections.Counter(str(f.get("thermal", "?")) for f in frames)
+        order = ["nominal", "fair", "serious", "critical"]
+        self._thermal_last = max(thermal, key=lambda s: order.index(s) if s in order else -1) if thermal else "nominal"
+        self.writer.event("captured", stop=self.stop_id, step=step, pose=k, image=image, n=len(frames), jitter=jitters,
+                          t0=round(t0, 3), t1=round(t1, 3), duration_s=round(t_shoot1 - t_shoot0, 3),
+                          thermal=dict(thermal))
         # the frames are on the phone; the robot may leave now — pull + bookkeeping happen in _finalize
         return {"stop": self.stop_id, "step": step, "pose": k, "image": image, "frames": frames, "t0": t0, "t1": t1,
                 "jitters": jitters, "centre": centre, "source": source, "applied": applied, "off": off}
@@ -627,9 +987,16 @@ class Coordinator:
         p = self.plan
         stop, step, k, image, frames = pend["stop"], pend["step"], pend["pose"], pend["image"], pend["frames"]
         t0, t1, jitters, centre, source, applied, off = (pend[x] for x in ("t0", "t1", "jitters", "centre", "source", "applied", "off"))
-        # PULL into images/<image>/stack/ — but only when the Mac buffer has room: at most
-        # merge_max_pending stacks (x 50 frames) unmerged on the Mac; the phone keeps the frames meanwhile
-        if self.merger and p.merge_delete_raw and p.merge_max_pending > 0:
+        # PULL into images/<image>/stack/ — but only when the local buffer has room: at most
+        # merge_max_pending stacks (x 50 frames) waiting for the merge (+ upload) on this disk; the
+        # phone keeps the frames meanwhile. Applies when something deletes the local copies.
+        max_pending = p.upload_max_pending or p.merge_max_pending
+        if self.uploader and p.upload_delete_local and max_pending > 0:
+            waited = self.uploader.wait_for_room(max_pending, extra_pending=lambda: self.merger.pending if self.merger else 0,
+                                                 log=self.log)
+            if waited > 0:
+                self.writer.event("merge_buffer_wait", stop=stop, seconds=round(waited, 1))
+        elif self.merger and p.merge_delete_raw and p.merge_max_pending > 0:
             waited = self.merger.wait_for_room(p.merge_max_pending, log=self.log)
             if waited > 0:
                 self.writer.event("merge_buffer_wait", stop=stop, seconds=round(waited, 1))
@@ -691,11 +1058,30 @@ class Coordinator:
         self.writer.event("stop_ok", stop=stop, step=step, pose=k, image=image, files=names, jitter=jitters)
         self.stats["stops_ok"] += 1
         self.progress.done_stacks += 1
+        self._stop_files[stop] = (image, list(names))
         if self.merger:
-            self.merger.submit(stop)
+            if self.uploader and p.upload_what in ("raw", "all"):
+                self.uploader.submit(stop, image, names, phase="raw")     # raw up NOW, in parallel with the merge
+            self.merger.submit(stop)                         # -> _on_merge_done -> final upload (master + check)
+        elif self.uploader:
+            self.uploader.submit(stop, image, names, merged_ok=None)
+        self._write_summary()
+        self._collect_poses()
 
 
 # ---------------------------------------------------------------------------
+def repo_commit():
+    """Short git commit of this coordinator (for the session summary), "" if unknown."""
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True, timeout=5)
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root,
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+        return out.stdout.strip() + ("+dirty" if dirty else "") if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def wait_for_mocap(mocap, bodies=("phone", "popillia"), timeout=30.0, log=print, measure_s=2.0):
     """Start-up check: every body must deliver samples. Prints one line per
     body (topic, rate) and returns the list of bodies NOT received."""
@@ -721,6 +1107,113 @@ def wait_for_mocap(mocap, bodies=("phone", "popillia"), timeout=30.0, log=print,
     return missing
 
 
+def _free_bytes(path):
+    """Free bytes of the file system that will hold `path` (the nearest existing parent)."""
+    p = os.path.abspath(os.path.expanduser(path))
+    while p and not os.path.exists(p):
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    try:
+        st = os.statvfs(p)
+        return st.f_bavail * st.f_frsize
+    except OSError:
+        return None
+
+
+def describe_precision(plan):
+    pr = plan.turntable_precision()
+    if pr["exact"]:
+        return f"exact: {plan.turntable_step_deg / pr['deg_per_microstep']:.0f} microsteps per step"
+    return (f"{pr['deg_per_microstep']:.4f} deg per microstep, worst rounding {pr['max_error_deg']:.4f} deg "
+            f"at any stop, never accumulating")
+
+
+def ask_rotations(plan):
+    """How many insect rotations per revolution: the step becomes exactly 360/N deg. With the
+    motor the microstep resolution and the worst rounding error are printed (the board rounds
+    every ABSOLUTE target, so the error never accumulates); N values that are an integer number
+    of microsteps are listed."""
+    motor = plan.turntable_drive != "manual"
+    while True:
+        ans = input(f"\n>>> Number of insect rotations per revolution (1 = no rotation, 36 = every 10 deg) "
+                    f"[{plan.turntable_steps}]: ").strip()
+        if not ans:
+            plan.set_turntable_steps(plan.turntable_steps)
+            break
+        try:
+            plan.set_turntable_steps(int(ans))
+            break
+        except ValueError as err:
+            print(f"   {err}")
+    if not motor:
+        print(f"   manual platter: you turn the insect by {plan.turntable_step_deg:g} deg per step and press Enter "
+              f"(the motor is planned, not built: turntable_drive serial)")
+    if motor:
+        pr = plan.turntable_precision()
+        mspr = int(round(pr["microsteps_per_rev"]))
+        exact = [n for n in range(1, 361) if mspr % n == 0]
+        print(f"   motor: {mspr} microsteps per platter revolution -> {describe_precision(plan)}")
+        if not pr["exact"]:
+            print(f"   exact step counts with this motor/microstepping: {', '.join(str(n) for n in exact if n <= 100)}")
+
+
+def ask_session_dir(plan, out_root, default, resume=False, ask=True):
+    """Where the session data goes. Shows the size the plan needs and the free space."""
+    default = default or os.path.join(out_root, f"{plan.name}_" + time.strftime("%Y%m%d"))
+    raw_b, master_b = plan.storage_estimate()
+    keep = []
+    deleting = (plan.upload_remote and plan.upload_delete_local) or (plan.merge_inline and plan.merge_delete_raw)
+    if plan.merge_inline and plan.merge_delete_raw and plan.upload_what == "masters" or (plan.merge_inline and plan.merge_delete_raw and not plan.upload_remote):
+        keep.append(f"raw only until merged (<= {plan.merge_max_pending} stops on disk)")
+    elif plan.upload_remote and plan.upload_delete_local:
+        keep.append(f"raw + masters only until uploaded (<= {plan.upload_max_pending or plan.merge_max_pending} stops on disk)")
+    else:
+        keep.append("everything stays on this disk")
+    print(f"\nsession size: {plan.stops_planned()} stops -> ~{raw_b / 1e9:.0f} GB raw"
+          + (f" + ~{master_b / 1e9:.0f} GB masters" if master_b else "") + f"; {'; '.join(keep)}")
+    while True:
+        if ask:
+            ans = input(f">>> Session folder (the dataset itself) [{default}]: ").strip()
+            path = os.path.expandvars(os.path.expanduser(ans)) if ans else default
+        else:
+            path = default
+        path = os.path.abspath(path)
+        holds = os.path.exists(os.path.join(path, "session.jsonl")) or os.path.exists(os.path.join(path, "frames.csv"))
+        if holds and not resume:
+            print(f"   {path} already holds a session: start with --resume to continue it, or choose another folder")
+            if not ask:
+                sys.exit(1)
+            continue
+        if resume and not holds:
+            print(f"   --resume but {path} holds no session yet (a new one starts there)")
+        free = _free_bytes(path)
+        need = (0 if not deleting else 0) if deleting else raw_b + master_b
+        if free is not None:
+            print(f"   free space there: {free / 1e9:.0f} GB" + (f" (needs ~{need / 1e9:.0f} GB without deletion)" if need else ""))
+            if need and free < need and ask:
+                if input("   not enough space for the whole session. Continue anyway? [y/N] ").strip().lower() not in ("y", "yes"):
+                    continue
+        return path
+
+
+ONEDRIVE_DATASETS = "onedrive:SUPSI"        # every dataset lives under OneDrive-USI/SUPSI (user, 2026-09-29)
+
+
+def ask_remote(plan):
+    default = plan.upload_remote or "-"
+    ans = input(f">>> Upload to OneDrive during the session (folder name under {ONEDRIVE_DATASETS}/, "
+                f"or a full rclone remote:path, '-' = none) [{default}]: ").strip()
+    if not ans:
+        ans = default
+    if ans == "-":
+        return ""
+    if ":" not in ans:                                  # bare name -> under SUPSI
+        ans = f"{ONEDRIVE_DATASETS}/{ans.strip('/')}"
+    return ans
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--plan", required=True)
@@ -732,7 +1225,10 @@ def main(argv=None):
     ap.add_argument("--auto-operator", choices=["retry", "skip", "abort", "accept"],
                     help="answer every operator prompt automatically (tests)")
     ap.add_argument("--output-root", help="override plan.output_root")
-    ap.add_argument("--session-dir", help="override plan.session_dir (the dataset folder itself)")
+    ap.add_argument("--session-dir", help="override plan.session_dir (the dataset folder itself); also skips the folder question")
+    ap.add_argument("--remote", help="override plan.upload_remote (rclone remote:path; '-' = no upload); skips that question")
+    ap.add_argument("--rotations", type=int, help="override plan.turntable_steps (step = 360/N deg); skips that question")
+    ap.add_argument("--no-ask", action="store_true", help="take the plan's folder / remote / rotations without asking")
     ap.add_argument("--resume", action="store_true", help="continue an existing session folder (captured stops are skipped)")
     ap.add_argument("--start-step", type=int, default=0, help="first turntable step to run (resume)")
     ap.add_argument("--stack-start", type=float, help="override plan.focus_stack_start")
@@ -747,6 +1243,36 @@ def main(argv=None):
     print(f"focus stack: {plan.frames_per_stop} frame(s) per stop, lens {plan.focus_stack_start}→{plan.focus_stack_end}")
     out_root = a.output_root or plan.output_root
     session_dir = a.session_dir or plan.session_dir or None
+    ask = not (a.no_ask or a.auto_operator) and sys.stdin.isatty()
+    # -- start questions: rotations, session folder, OneDrive destination (Enter = the plan's value)
+    if a.rotations is not None:
+        plan.set_turntable_steps(a.rotations)
+    elif ask and not a.resume:
+        ask_rotations(plan)
+    print(f"insect rotations: {plan.turntable_steps} x {plan.turntable_step_deg:g} deg"
+          + (f" ({describe_precision(plan)})" if plan.turntable_drive != "manual" else "")
+          + f"; {plan.stops_planned()} stops x {plan.frames_per_stop} frames")
+    if session_dir is None or (ask and not a.session_dir):
+        session_dir = ask_session_dir(plan, out_root, session_dir, resume=a.resume, ask=ask)
+    if a.remote is not None:
+        plan.upload_remote = "" if a.remote.strip() in ("-", "") else a.remote.strip()
+    elif ask:
+        plan.upload_remote = ask_remote(plan)
+    plan.validate_upload()
+    uploader_check = None
+    if plan.upload_remote:
+        uploader_check = UploadWorker(session_dir or out_root, plan.upload_remote, what=plan.upload_what, rclone=plan.upload_rclone)
+        try:
+            uploader_check.check_remote()
+        except RuntimeError as err:
+            uploader_check.close()
+            sys.exit(f"OneDrive upload: {err}")
+        free, total, _ = uploader_check.about()
+        uploader_check.close()
+        print(f"upload: {plan.upload_what} -> {plan.upload_remote} (reachable"
+              + (f", {free / 1e9:.0f} GB free of {total / 1e9:.0f}" if free is not None and total else "") + ")")
+    else:
+        print("upload: none (everything stays in the session folder" + ("" if plan.merge_delete_raw else " and on the phone") + ")")
     writer = SessionWriter(out_root, name=plan.name, session_dir=session_dir, resume=a.resume)
     print(f"session folder: {writer.dir}" + (" (resumed)" if writer.resumed else ""))
     writer.save_plan(plan.to_dict(), a.plan)
@@ -806,9 +1332,16 @@ def main(argv=None):
     if a.mocap == "synthetic":
         on_turn = lambda step, target: mocap.set_target_yaw(target)   # the "operator" turns the platter
 
-    launcher.start_robot(plan.turntable_steps - a.start_step)
+    from .turntable import make_turntable
+    turntable = make_turntable(plan)
+    if turntable is not None:
+        print(f"turntable: {plan.turntable_drive} ({plan.turntable_port}), {plan.turntable_step_deg:g} deg per step, "
+              f"{plan.turntable_steps_per_rev * plan.turntable_microsteps * plan.turntable_gear_ratio:.0f} microsteps/rev")
+    print(f"loop order: {plan.loop_order} = {plan.loop_order_text()}")
+    launcher.start_robot(1 if plan.loop_order == "rotations-per-pose" else plan.turntable_steps - a.start_step)
     coord = Coordinator(plan, phone, lambda: RobotClient(plan.robot_host, plan.robot_port),
-                        mocap, puller, writer, operator=operator, on_turntable_prompt=on_turn, start_step=a.start_step)
+                        mocap, puller, writer, operator=operator, on_turntable_prompt=on_turn, start_step=a.start_step,
+                        turntable=turntable)
     if console is not None:
         coord.console = console
         console.status_fn = coord.status_line
@@ -820,8 +1353,9 @@ def main(argv=None):
         print("\n>>> Ctrl-C: pausing at the next checkpoint (after the running stack). Ctrl-C again = abort.")
     signal.signal(signal.SIGINT, on_sigint)
     print("pause at any time: type p + Enter, or Ctrl-C once, or `touch " + pause_file(writer.dir) + "`")
+    stats = {}
     try:
-        coord.run()
+        stats = coord.run()
     finally:
         if plan.stop_confirm and launcher.procs:
             coord.notifier.start("Session finished. Press Enter to stop the recording.")
@@ -832,6 +1366,46 @@ def main(argv=None):
                 coord.notifier.stop()
         launcher.stop()
         mocap.close()
+        if plan.upload_remote:
+            # the bag recorder is stopped now: the final sync sends mocap/ (-> poses/mocap_bag/) and the last summary
+            final = UploadWorker(writer.dir, plan.upload_remote, what=plan.upload_what, rclone=plan.upload_rclone,
+                                 transfers=plan.upload_transfers, bwlimit=plan.upload_bwlimit, timeout_s=plan.upload_timeout_s)
+            try:
+                ok = final.upload_session_files(final=True, check=plan.upload_delete_session)
+                print(f"final sync (mocap bag, session files) -> {plan.upload_remote}: {'ok' if ok else 'FAILED'}"
+                      + (" (verified)" if ok and plan.upload_delete_session else ""))
+            finally:
+                final.close()
+            if plan.upload_delete_session:
+                delete_session_folder(writer.dir, stats, final_ok=ok)
+
+
+def delete_session_folder(session_dir, stats, final_ok):
+    """plan upload_delete_session: the whole session folder goes when (1) the final sync was verified,
+    (2) every captured stop was uploaded and none failed, (3) nothing is left under images/.
+    Otherwise the folder stays and the reason is printed (user, 2026-09-29: once everything is in
+    OneDrive the local copy is not needed)."""
+    import shutil
+    left = sum(len(fs) for _r, _d, fs in os.walk(os.path.join(session_dir, "images")))
+    why = []
+    if not final_ok:
+        why.append("final sync not verified")
+    if stats.get("uploaded_failed"):
+        why.append(f"{stats['uploaded_failed']} stop upload(s) failed")
+    if stats.get("stops_ok", 0) != stats.get("uploaded_ok", 0):
+        why.append(f"{stats.get('stops_ok', 0)} stops captured but {stats.get('uploaded_ok', 0)} uploaded")
+    if left:
+        why.append(f"{left} file(s) still under images/")
+    if why:
+        print(f"session folder KEPT ({'; '.join(why)}): {session_dir}")
+        return False
+    try:
+        shutil.rmtree(session_dir)
+    except OSError as e:
+        print(f"session folder could not be deleted: {e}")
+        return False
+    print(f"session folder deleted (everything is in the cloud): {session_dir}")
+    return True
 
 
 if __name__ == "__main__":

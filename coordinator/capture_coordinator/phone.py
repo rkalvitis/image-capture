@@ -65,7 +65,7 @@ class PhoneClient:
                 self._reconnect()
 
     def hello(self, session, lens_positions, settle_ms, exposure, wb, power=None):
-        """power: optional {raw, quality, frame_rate, screen_brightness, preview} (heat reduction)."""
+        """power: optional {raw, quality, frame_rate, screen_brightness, preview, blackout} (heat reduction)."""
         self._hello = dict(session=session, lens_positions=lens_positions,
                            settle_ms=settle_ms, exposure=exposure, wb=wb, power=power)
         msg = {"type": "hello", "t": time.time(), "session": session,

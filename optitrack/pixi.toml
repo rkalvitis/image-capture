@@ -27,6 +27,9 @@ ros-humble-rviz2 = "*"
 # Needed to colcon-build the optitrack_msgs interface package (msg/*.msg).
 # numpy is required by rosidl_generator_py's find_package(Python ... NumPy).
 ros-humble-rosidl-default-generators = "*"
+# empy pinned: rosidl_adapter (Humble) uses em.BUFFERED_OPT, removed in empy 4 -> the linux-64
+# solve picked 4.2.1 and colcon failed on the robot PC (2026-09-29); osx-arm64 already had 3.3.4
+empy = "==3.3.4"
 numpy = "*"
 colcon-common-extensions = "*"
 compilers = "*"
@@ -52,6 +55,7 @@ opencv = ">=4.8"
 # required by the vendored ETH-ASL hand_eye_calibration solver
 # (scripts/calibrate_handeye_eth.py; clone noted in that script's docstring)
 matplotlib = "*"
+pyserial = ">=3.5,<4"
 
 [feature.optitrack.pypi-dependencies]
 # natnet_py: Jerome Guzzi's pure-Python NatNet client. Editable install from

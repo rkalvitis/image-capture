@@ -23,6 +23,7 @@ def power_fields(a):
     if a.fps: f["frame_rate"] = a.fps
     if a.brightness is not None: f["screen_brightness"] = a.brightness
     if a.preview: f["preview"] = a.preview == "on"
+    if a.blackout: f["blackout"] = a.blackout == "on"
     return f
 
 
@@ -74,6 +75,7 @@ def main():
     ap.add_argument("--fps", type=int, help="hello/ui: cap the preview/intrinsics frame rate")
     ap.add_argument("--brightness", type=float, help="hello/ui: screen brightness 0..1")
     ap.add_argument("--preview", choices=["on", "off"], help="hello/ui: live preview on the phone")
+    ap.add_argument("--blackout", choices=["on", "off"], help="hello/ui: plain black screen, nothing drawn (long-press 2 s on the phone ends it)")
     a = ap.parse_args()
     t = time.time()
     if a.cmd == "hello":

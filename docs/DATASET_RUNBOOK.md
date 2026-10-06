@@ -80,8 +80,9 @@ request and shows a banner, repeated every 45 s until you answer
 |---|---|---|
 | start | "Robot at the initial pose. Place/check the insect (step 0), then press Enter" | insect on the pin, turntable at its start mark, Enter |
 | once, right after | "EV to apply on top of this exposure (Enter = +1.5, 0 = keep, or a value)" | read the table (foam / beetle brightness, clipped %), Enter for +1.5 EV or type another value; the next round shows the result, Enter (= 0) accepts |
-| every rotation | "TURN the insect to step N (+10 deg, yaw now Y), then press Enter" | turn the platter one index, Enter. No yaw check (removed 2026-09-16); the yaw is logged in the event and per frame |
+| every rotation | "TURN the insect to step N (+10 deg, yaw now Y), then press Enter" | turn the platter one index, Enter. No yaw check (removed 2026-09-16); the yaw is logged in the event and per frame. With `turntable_drive: serial` (motor, 2026-09-28) there is no prompt: the platter turns itself, the first prompt says "the motor turns it from now on" |
 | failure | "stop N (step s, pose k) failed 3 times: ..." | retry / skip / abort |
+| per pose (`loop_order: rotations-per-pose`, manual platter only) | "Pose k done. Turn the insect BACK to step 0 (reverse), then press Enter" | turn the platter back the same way, Enter (a motor does it alone) |
 | end | "Session finished (...). Press Enter to stop the mocap recording / tunnel" | Enter — closes the bag cleanly |
 
 ### Pause / resume at any time

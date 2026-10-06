@@ -1,0 +1,119 @@
+# MAC TEST RUN (prepared 2026-09-30, docs/MAC_RUNBOOK.md): the Mac is coordinator, focus stacker and
+# OneDrive uploader again; the robot PC only runs the robot script (socket confirm over the lab LAN).
+# 2 insect rotations (motor test: step = 180 deg, then the platter reverses to 0) x 9 stops
+# (init pose p0 + robot poses p1..p8) x 50 frames = 18 stops, merged on the Mac during the run,
+# raw frames uploaded to OneDrive right after the pull and deleted from the phone; after the
+# merge the master is uploaded and the local raw deleted; masters + sidecars stay in the dataset folder.
+#
+#   bash tools/run_coordinator.sh --plan coordinator/plan.mactest.yaml
+#
+# Inputs asked at the start (Enter = the values below): rotations 2, session folder, OneDrive folder.
+# Motor board not connected? -> turntable_drive: manual (Enter after turning by hand).
+name: mactest_2026-09-30
+subject: "test specimen"
+notes: "first Mac run of the new pipeline: Portenta turntable (2 rotations), ISO 80 1/100 s, blackout, upload + delete raw"
+session_dir: ~/Documents/repos/optitrack/datasets/mactest_2026-09-30
+output_root: ~/Documents/repos/optitrack/datasets
+
+# --- geometry -----------------------------------------------------------------------
+turntable_steps: 2               # the start prompt asks; N -> step = 360/N deg exactly, absolute targets, reverse to 0 at the end
+turntable_step_deg: 180.0
+turntable_yaw_tol_deg: 0.5
+loop_order: poses-per-rotation   # all 9 stops, turn 180 deg, all 9 stops, platter back to 0 (2 robot runs)
+turntable_drive: portenta        # the Portenta H7 stepper controller (docs/TURNTABLE.md); manual if the board is absent
+turntable_port: auto             # the single Arduino USB device, else /dev/cu.usbmodem...
+turntable_steps_per_rev: 200     # checked against the board's INFO
+turntable_microsteps: 16
+turntable_gear_ratio: 1.0        # NOT DECIDED (coupling): motor revolutions per platter revolution
+turntable_direction: 1           # -1 flips the sense (the mocap yaw sign is learned at the first move)
+turntable_speed_deg_s: 20.0
+turntable_accel_deg_s2: 40.0
+turntable_hold: true
+turntable_confirm: mocap         # yaw gate after each motor move (proves the platter really turned); Enter once at the start
+pose_confirm: false
+poses: 8                         # the robot PC's manual_poses.csv rows
+shoot_initial_pose: true         # + a stack at the initial pose = p0 -> p0..p8
+lens_position_initial: 0.3333
+lens_position: [0.2510, 0.3412, 0.1961, 0.1020, 0.1569, 0.3098, 0.1608, 0.2392]   # per pose 1..8 (focus_mode pose)
+focus_mode: pose
+frames_per_stop: 50
+focus_stack_step: 0
+focus_stack_start: 0.0
+focus_stack_end: 0.5
+settle_ms: 300
+settle_after_move_s: 10.0
+thermal_wait_s: 240              # idle before a stack while the phone is "serious" (bench: back to "fair" in < 4 min)
+
+# --- exposure / colour (user, 2026-09-30: the aug31 look) -----------------------------
+exposure_mode: custom
+exposure_iso: 80
+exposure_duration_s: 0.01        # 1/100 s
+exposure_check: true             # first stop: test frame + histogram, Enter = keep, or type an EV once
+exposure_check_ev: auto          # Enter applies the EV that puts the white foam at 0.85 sRGB (measured on the test frame)
+exposure_max_duration_s: 0.5
+wb: {mode: locked}
+
+# --- stillness (mocap) -----------------------------------------------------------------
+stillness_gate: false
+still_window_s: 1.0
+still_phone_mm: 0.1
+still_popillia_mm: 0.1
+still_timeout_s: 15.0
+max_retries: 2
+
+# --- phone (heat: bench 2026-09-30) ----------------------------------------------------
+phone_raw: proraw                # required
+phone_quality: speed
+phone_frame_rate: 10             # 3 fps was slower
+phone_screen_brightness: 0.0
+phone_preview: false
+phone_blackout: true             # plain black screen; `bye` or a 2 s long-press ends it
+phone_host: 127.0.0.1
+phone_port: 5601
+phone_bundle_id: ch.idsia.capture
+phone_device_id: F69E5036-B4BE-5579-B8CD-DDC135DF373F
+
+# --- robot (the PC, over the lab LAN) ----------------------------------------------------
+robot_host: 192.168.201.158
+robot_port: 5600
+robot_start_cmd: ""              # on the PC by hand: bash run_cycles.sh 2 _confirm_port:=5600 _object_radius:=0.04 _rod_radius:=0.01
+robot_files:
+  - robot/manual_poses.csv
+  - robot/joint_start_aug31.csv
+poses_collect: []                # the robot run logs are copied by hand after the run (docs/MAC_RUNBOOK.md)
+
+# --- calibration: none at capture time --------------------------------------------------
+rig_transforms: ""
+calibration_files: []
+
+# --- start / stop everything ------------------------------------------------------------
+start_tunnel: true
+launch_app: true
+record_mocap: true
+mocap_bodies: "phone popillia"
+dump_bodies: true
+optitrack_repo: optitrack
+stop_confirm: false              # unattended end: bag + tunnel stop, final sync, exit
+notify: true
+notify_repeat_s: 45
+
+# --- merge on the Mac (~90 s per stop, 3 in parallel) ------------------------------------
+merge_inline: true
+merge_fusion: pyramid
+merge_format: tif
+merge_jobs: 3
+merge_ref_index: -1
+merge_delete_raw: false          # the UPLOAD deletes the raw (after merge + verified cloud copy)
+merge_index_maps: false
+merge_max_pending: 5
+merge_python: ""
+
+# --- OneDrive (docs/ONEDRIVE.md) ----------------------------------------------------------
+upload_remote: "onedrive:SUPSI/mactest_2026-09-30"
+upload_what: all                 # raw + sidecars -> raw/, masters -> stacked/, previews/, stack_meta/
+upload_delete_local: true        # after merge + verified upload the whole local images/<image>/ folder goes (masters too, user 2026-09-30)
+upload_delete_phone: true        # the phone is emptied stop by stop after the verified raw upload
+upload_delete_session: false     # the dataset folder is kept on the Mac (user, 2026-09-30)
+upload_rclone: rclone
+upload_transfers: 4
+upload_timeout_s: 7200

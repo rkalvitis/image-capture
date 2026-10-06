@@ -17,6 +17,8 @@ final class AppState: ObservableObject {
     @Published var showPreview = true          // ui {"preview": false} / hello {"preview": false}: no live preview (less GPU + heat)
     @Published var lowFps = false              // frame rate capped at 10 fps (preview + intrinsics tap)
     @Published var dimmed = false              // screen brightness 0.02
+    @Published var blackout = false            // hello/ui {"blackout": true}: the whole screen is plain black (no panel, no
+                                               // preview, brightness 0) for the dataset session; long-press 2 s or `bye` ends it
     private var brightnessBeforeDim: CGFloat = 0.5
     @Published var log: [String] = []
 
@@ -95,9 +97,9 @@ final class AppState: ObservableObject {
         if (dimmed != on) { toggleDim() }
     }
 
-    /// Screen brightness (0..1) and live preview on/off — both on the main thread.
-    private func applyScreen(brightness: Double?, preview: Bool?) {
-        if brightness == nil && preview == nil { return }
+    /// Screen brightness (0..1), live preview on/off, blackout — all on the main thread.
+    private func applyScreen(brightness: Double?, preview: Bool?, blackout: Bool? = nil) {
+        if brightness == nil && preview == nil && blackout == nil { return }
         let sem = DispatchSemaphore(value: 0)
         DispatchQueue.main.async {
             if let b = brightness {
@@ -106,10 +108,27 @@ final class AppState: ObservableObject {
                 self.dimmed = b <= 0.1
             }
             if let p = preview { self.showPreview = p }
+            if let k = blackout { self.setBlackout(k) }
             sem.signal()
         }
         _ = sem.wait(timeout: .now() + 2)
-        addLog("screen: brightness \(brightness.map { String(format: "%.2f", $0) } ?? "-"), preview \(preview.map(String.init) ?? "-")")
+        addLog("screen: brightness \(brightness.map { String(format: "%.2f", $0) } ?? "-"), preview \(preview.map(String.init) ?? "-")"
+               + (blackout.map { ", blackout \($0)" } ?? ""))
+    }
+
+    /// Blackout (main thread): nothing drawn, preview off, brightness 0 — the OLED shows pure black.
+    /// The capture server and the camera keep running; only the UI stops.
+    func setBlackout(_ on: Bool) {
+        if on {
+            if !dimmed { brightnessBeforeDim = max(UIScreen.main.brightness, 0.3) }
+            showPreview = false
+            UIScreen.main.brightness = 0
+            dimmed = true
+        } else {
+            UIScreen.main.brightness = brightnessBeforeDim
+            dimmed = false
+        }
+        blackout = on
     }
 
     static func thermalName() -> String {
@@ -211,7 +230,8 @@ extension AppState: ControlHandler {
                     return ["type": "error", "reason": "power: \(error)", "t": now]
                 }
             }
-            applyScreen(brightness: msg["screen_brightness"] as? Double, preview: msg["preview"] as? Bool)
+            applyScreen(brightness: msg["screen_brightness"] as? Double, preview: msg["preview"] as? Bool,
+                        blackout: msg["blackout"] as? Bool)
             DispatchQueue.main.async {
                 self.sessionId = session
                 self.lensPosition = self.camera.currentLensPosition()
@@ -289,7 +309,8 @@ extension AppState: ControlHandler {
             if let v = msg["horizontal"] as? Bool { d.set(v, forKey: "uiHorizontal") }
             if let v = msg["clips"] as? Bool { d.set(v, forKey: "showClips") }
             if let v = msg["fill"] as? Bool { d.set(v, forKey: "previewFill") }
-            applyScreen(brightness: msg["screen_brightness"] as? Double, preview: msg["preview"] as? Bool)
+            applyScreen(brightness: msg["screen_brightness"] as? Double, preview: msg["preview"] as? Bool,
+                        blackout: msg["blackout"] as? Bool)
             var power = ""
             if msg["raw"] != nil || msg["quality"] != nil || msg["frame_rate"] != nil {
                 do {
@@ -312,6 +333,7 @@ extension AppState: ControlHandler {
 
         case "bye":
             addLog("bye")
+            applyScreen(brightness: nil, preview: nil, blackout: false)      // the screen comes back after the session
             return ["type": "status", "t": now, "thermal": AppState.thermalName()]
 
         default:

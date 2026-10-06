@@ -23,10 +23,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class MergeWorker:
-    def __init__(self, session_dir, ref_index, python=None, delete_raw=False, log=print, extra_args=(), jobs=1):
+    def __init__(self, session_dir, ref_index, python=None, delete_raw=False, log=print, extra_args=(), jobs=1, on_done=None):
         self.session_dir, self.ref_index = session_dir, int(ref_index)
         self.python = python or sys.executable
         self.delete_raw, self.log, self.extra = delete_raw, log, list(extra_args)
+        self.on_done = on_done              # on_done(stop, ok) — e.g. hand the stop to the upload worker
         self.q = queue.Queue()
         self.results = {}          # stop -> (ok, seconds, message)
         self.pending = 0
@@ -69,8 +70,14 @@ class MergeWorker:
                 ok, msg = False, str(err)
             with self._lock:
                 self.results[stop] = (ok, time.time() - t0, msg)
-                self.pending -= 1
             self.log(f"[merge] stop {stop}: {'ok' if ok else 'FAILED'} in {time.time() - t0:.0f}s — {msg}")
+            if self.on_done is not None:
+                try:
+                    self.on_done(stop, ok)          # before pending drops: drain() never misses the hand-off
+                except Exception as err:            # noqa: BLE001
+                    self.log(f"[merge] stop {stop}: on_done failed: {err}")
+            with self._lock:
+                self.pending -= 1
 
     def wait_for_room(self, max_pending, log=None, log_every=30.0):
         """Block while `max_pending` or more stops are still unmerged (the raw

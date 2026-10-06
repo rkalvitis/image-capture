@@ -32,7 +32,7 @@ def default_client_ip(server: str) -> str:
         s.connect((server, 1510))
         return s.getsockname()[0]
     except OSError:
-        return '192.168.201.245'
+        return '0.0.0.0'      # no route to the Motive PC (Mac was .245, robot PC .158): bind all
     finally:
         s.close()
 

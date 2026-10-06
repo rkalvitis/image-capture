@@ -42,6 +42,20 @@ MOCAP_COLUMNS = ["body", "t", "x", "y", "z", "qx", "qy", "qz", "qw"]
 SUBDIRS = ("images", "calibrations", "mocap", "robot", "exposure_check")
 
 
+def read_frames_csv(path):
+    """Rows of frames.csv as dicts. Tolerates a file whose header line is missing (a session
+    killed before the header was flushed, then resumed — seen 2026-09-30): the columns are
+    then FRAME_COLUMNS in order."""
+    if not os.path.exists(path):
+        return []
+    with open(path, newline="") as f:
+        first = f.readline()
+        f.seek(0)
+        if first.startswith("image,"):
+            return list(csv.DictReader(f))
+        return list(csv.DictReader(f, fieldnames=FRAME_COLUMNS))
+
+
 def stack_name(step, pose):
     return f"s{int(step):02d}_p{int(pose)}"
 
@@ -68,17 +82,17 @@ class SessionWriter:
         if existing:
             self._load_existing()
         self._events = open(os.path.join(self.dir, "session.jsonl"), "a")
-        new = not os.path.exists(self._frames_path)
+        new = not os.path.exists(self._frames_path) or os.path.getsize(self._frames_path) == 0
         self._frames = open(self._frames_path, "a", newline="")
         self._csv = csv.DictWriter(self._frames, fieldnames=FRAME_COLUMNS)
         if new:
-            self._csv.writeheader()
+            self._csv.writeheader(); self._frames.flush()        # flushed at once: a killed run must not leave an empty file
         rp = os.path.join(self.dir, "robot", "robot_poses.csv")
-        new_r = not os.path.exists(rp)
+        new_r = not os.path.exists(rp) or os.path.getsize(rp) == 0
         self._robot = open(rp, "a", newline="")
         self._robot_csv = csv.DictWriter(self._robot, fieldnames=ROBOT_COLUMNS)
         if new_r:
-            self._robot_csv.writeheader()
+            self._robot_csv.writeheader(); self._robot.flush()
 
     def _load_existing(self):
         self.resumed = True
@@ -99,8 +113,8 @@ class SessionWriter:
                         if y is not None:
                             self.yaw0 = float(y)
         if os.path.exists(self._frames_path):
-            with open(self._frames_path) as f:
-                for r in csv.DictReader(f):
+            if True:
+                for r in read_frames_csv(self._frames_path):
                     try:
                         key = (int(r["step"]), int(r["pose"]))
                         self.done[key] = r.get("image") or stack_name(*key)

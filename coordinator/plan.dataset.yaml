@@ -1,0 +1,122 @@
+# THE DATASET (prepared 2026-09-30 from the rehearsal; docs/MAC_RUNBOOK.md applies).
+# 36 motor rotations x 10 deg (absolute targets, reverse to 0 at the end) x 13 stops per rotation
+# (p0 at the initial pose + the robot's 12 poses) x 50 frames on the fixed range 0.0..0.5 = 468 stacks,
+# 23 400 ProRAW frames (~195 GB raw + ~28 GB masters into OneDrive, nothing stays on the Mac or the phone).
+# Rehearsal numbers: 55 s per stack, 69 s stop to stop, ~130 s per rotation change -> ~10.5 h.
+#
+#   bash tools/run_coordinator.sh --plan coordinator/plan.dataset.yaml
+#
+# On the PC first:   bash run_cycles.sh 36 _confirm_port:=5600 _obstacles:=false
+# Before: phone 100 % + airplane mode, Motive streaming both bodies, coupling checked (rehearsal turn 3 was
+# 4 deg short), app profile valid (free profile expires ~2026-10-07: rebuild + reinstall from the Mac if later).
+# {date} = the day you run it; Enter at the three start questions, Enter (or an EV) at the exposure check,
+# nothing else until the end.
+name: dataset_popillia_{date}
+subject: "popillia japonica, pinned"
+notes: "full dataset: 36 motor rotations x (p0 + 12 robot poses) x 50 frames, fixed focus range 0-0.5, auto EV, blackout"
+session_dir: ~/Documents/repos/optitrack/datasets/dataset_popillia_{date}
+output_root: ~/Documents/repos/optitrack/datasets
+
+# --- geometry -----------------------------------------------------------------------
+turntable_steps: 36              # 36 x 10 deg (the start prompt asks; step = 360/N exactly, 88.9 microsteps rounded per absolute target)
+turntable_step_deg: 10.0
+turntable_yaw_tol_deg: 0.5
+loop_order: poses-per-rotation   # all robot poses at one insect rotation, then the motor turns, repeat; reverse at the end
+turntable_drive: portenta
+turntable_port: auto
+turntable_steps_per_rev: 200
+turntable_microsteps: 16
+turntable_gear_ratio: 1.0        # direct drive after the glue; set from the measured yaw per commanded degree if not 1
+turntable_direction: -1          # rehearsal 2026-09-30 after the glue: +90 deg commanded -> popillia yaw -89.9 / -89.6 / -86.0 deg
+turntable_speed_deg_s: 20.0
+turntable_accel_deg_s2: 40.0
+turntable_hold: true
+turntable_confirm: mocap         # yaw waited for (bounded) and recorded after every motor move, never a prompt
+pose_confirm: false
+poses: 12                        # the robot's manual_poses.csv rows (the robot's count wins at run time)
+shoot_initial_pose: true         # + p0 at the initial pose
+lens_position_initial: 0.25      # unused with focus_mode range (kept for the record)
+lens_position: [0.25]            # one value = replicated to every pose; unused with focus_mode range
+focus_mode: range                # fixed 50 positions 0.0..0.5 at every stop (user, 2026-09-30); merge reference = the frame where the beetle is sharpest
+frames_per_stop: 50
+focus_stack_start: 0.0
+focus_stack_end: 0.5
+focus_stack_step: 0
+settle_ms: 300
+settle_after_move_s: 10.0
+thermal_wait_s: 240
+
+# --- exposure / colour --------------------------------------------------------------
+exposure_mode: custom            # starting point ISO 80 1/100 s; the check measures the light and proposes the EV
+exposure_iso: 80
+exposure_duration_s: 0.01
+exposure_check: true
+exposure_check_ev: auto          # Enter applies the EV that puts the white foam (frame p99) at 0.85 sRGB (+2.4 on 2026-09-30)
+exposure_max_duration_s: 0.5
+wb: {mode: locked}
+
+# --- stillness (mocap) ----------------------------------------------------------------
+stillness_gate: false
+still_window_s: 1.0
+still_phone_mm: 0.1
+still_popillia_mm: 0.1
+still_timeout_s: 15.0
+max_retries: 2
+
+# --- phone ------------------------------------------------------------------------------
+phone_raw: proraw
+phone_quality: speed
+phone_frame_rate: 10
+phone_screen_brightness: 0.0
+phone_preview: false
+phone_blackout: true
+phone_host: 127.0.0.1
+phone_port: 5601
+phone_bundle_id: ch.idsia.capture
+phone_device_id: F69E5036-B4BE-5579-B8CD-DDC135DF373F
+
+# --- robot (the PC over the lab LAN) ---------------------------------------------------
+robot_host: 192.168.201.158
+robot_port: 5600
+robot_start_cmd: ""              # on the PC: bash run_cycles.sh 36 _confirm_port:=5600 _obstacles:=false   (no obstacle scene)
+robot_files:
+  - robot/manual_poses.csv       # keep this copy in sync with the PC's new pose file (robot/ = reference copy)
+  - robot/joint_start_aug31.csv
+poses_collect: []                # robot run logs copied by hand afterwards (docs/MAC_RUNBOOK.md)
+
+# --- calibration: none at capture time ---------------------------------------------------
+rig_transforms: ""
+calibration_files: []
+
+# --- start / stop everything ---------------------------------------------------------------
+start_tunnel: true
+launch_app: true
+record_mocap: true
+mocap_bodies: "phone popillia"
+dump_bodies: true
+optitrack_repo: optitrack
+stop_confirm: false
+notify: true
+notify_repeat_s: 45
+
+# --- merge on the Mac --------------------------------------------------------------------
+merge_inline: true
+merge_fusion: pyramid
+merge_mask: sam3                 # SAM 3 "insect" mask picks the merge reference (user, 2026-10-06)
+merge_format: tif
+merge_jobs: 3
+merge_ref_index: -1
+merge_delete_raw: false
+merge_index_maps: false
+merge_max_pending: 5
+merge_python: ""
+
+# --- OneDrive ------------------------------------------------------------------------------
+upload_remote: "onedrive:SUPSI/dataset_popillia_{date}"
+upload_what: all
+upload_delete_local: true        # after merge + verified upload the whole local images/<image>/ folder goes (masters too, user 2026-09-30)
+upload_delete_phone: true
+upload_delete_session: false
+upload_rclone: rclone
+upload_transfers: 4
+upload_timeout_s: 7200

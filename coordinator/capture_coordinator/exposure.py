@@ -76,7 +76,7 @@ def find_subject(gray, p50=None, central=0.9, min_area_frac=1.5e-4, ring_px=3, r
     return tuple(int(round(v / scale)) for v in best)
 
 
-def exposure_stats(lin_rgb, evs=(0.0, 0.5, 1.0, 1.5, 2.0)):
+def exposure_stats(lin_rgb, evs=(0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0)):
     """lin_rgb: linear float32 RGB in [0, 1]. Returns a dict with the frame
     percentiles, the subject box and one row per EV correction."""
     import cv2
@@ -108,6 +108,23 @@ def format_stats(st):
     for r in st["rows"]:
         lines.append(f"  {r['ev']:+.1f}   {r['frame_p50_srgb']:.3f}      {r['subject_p50_srgb']:.3f}       {r['clipped_pct']:6.2f} %")
     return "\n".join(lines)
+
+
+def auto_ev(st, target_p99_srgb=0.85, lo=-3.0, hi=4.0):
+    """EV that puts the frame's 99th percentile (the white foam) at `target_p99_srgb`, from the
+    linear statistics of the test frame: the brightest common tone lands near white without
+    clipping, the (dark) beetle follows. Rounded to 0.1 EV, clamped to [lo, hi]."""
+    import math
+    p99 = float(st.get("frame_p99") or 0.0)
+    if p99 <= 0:
+        return 0.0
+    target_lin = _srgb_inverse(target_p99_srgb)
+    ev = math.log2(target_lin / p99)
+    return round(min(hi, max(lo, ev)), 1)
+
+
+def _srgb_inverse(v):
+    return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
 
 
 def apply_ev(duration_s, iso, ev, max_duration_s=0.1, min_iso=32.0, max_iso=3200.0):

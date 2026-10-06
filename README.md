@@ -4,9 +4,12 @@ Phone app + Mac coordinator + robot handshake that run a capture session
 without touching the phone: the arm goes to a pose, the mocap stream says
 the rig is still, the phone shoots a focus stack on command, files and
 metadata land in the dataset folder, the arm moves on. The turntable is
-still turned by hand between runs (confirmed by mocap, no keypress). The
+turned by hand between runs (Enter) or, from 2026-09-28, by a NEMA 17 stepper
+on a USB-serial board (`hardware/turntable/`, `turntable_drive: serial`). The
 stacks are merged on the Mac (during the session if wanted) and exported
-straight to a COLMAP model with one camera per image.
+straight to a COLMAP model with one camera per image. No calibration is
+applied at capture time: the hand-eye / intrinsics YAMLs are used afterwards,
+on the Mac, when the dataset is processed (user, 2026-09-28).
 
 Plan, protocol and decisions: `docs/` (start with `docs/README.md`).
 
@@ -24,12 +27,86 @@ image-capture/
   NOTES.md        measured facts from the real phone/rig
 ```
 
+## OneDrive upload, `poses/`, start questions (2026-09-29)
+
+- **Upload during the session** (`docs/ONEDRIVE.md`): plan `upload_remote: onedrive:SUPSI/<dataset>`,
+  `upload_what all|masters|raw`, `upload_delete_local`, `upload_delete_phone`. After each stop's
+  merge the upload worker runs `rclone copy` + `rclone check --one-way`; only a verified copy
+  lets it delete the dng/tif locally and the DNG + sidecar on the phone (AFC, `pull_worker.py
+  delete`). Session files, `poses/` and the mocap bag (→ `poses/mocap_bag/`) are synced too.
+  Cloud layout = the existing datasets: `raw/` (dng + json, flat), `stacked/` (tif), `previews/`,
+  `stack_meta/`, `poses/`, `robot/`, `calibrations/` + the session files.
+  rclone token: created once on the Mac (`rclone authorize "onedrive"`), pasted into the PC.
+  `tools/upload_speedtest.sh remote:path` measures MB/s. With `upload_what raw|all` the plan must
+  have `merge_delete_raw: false` (the upload deletes).
+- **`<session>/poses/`** (`poses_collect.py`, after every stop): `stops.csv` (per stop: joints,
+  phone/popillia body poses, platter deg, yaw), `turntable.csv`, `robot_poses.csv`,
+  `mocap/<image>.csv`, `robot_runs/` = the robot scripts' own `manual_poses_<ts>.csv` /
+  `joint_states_<ts>.db` matched by the plan's `poses_collect` globs.
+- **The run command asks at start** (Enter = plan value; `--no-ask`, `--auto-operator`, or
+  `--rotations N --session-dir D --remote R` skip it): number of insect rotations per revolution
+  (`turntable_step_deg` becomes exactly 360/N; with the motor the microstep resolution and the
+  worst per-stop rounding are printed, the board rounds absolute targets so nothing accumulates),
+  the session folder (with size estimate + free space), the OneDrive destination (`-` = none,
+  then a pre-flight `rclone mkdir`/`lsd`).
+- **Ubuntu test run**: `coordinator/plan.ubuntu_test.yaml` (1 rotation × 9 vertical poses × 50 frames,
+  upload all, delete local + phone) + `docs/UBUNTU_TEST_RUNBOOK.md`; repo goes to the PC with
+  `tools/sync_to_pc.sh` → `~/shared_ws/roberts_ws/image-capture/`.
+- Tests: `tests/test_upload.py` (11) + two dry-run upload tests against `tests/fake_rclone.py`; 51 green.
+
 ## Status (2026-09-28)
 
 The OptiTrack repo is merged into `optitrack/` (git subtree, history kept) on
 the branch `image-capture-pipeline`, and every session-time part also runs on
 Ubuntu (see "One-time setup on the Ubuntu robot PC"). Only the iPhone app build
 stays on the Mac. Nothing has been run on the robot PC yet.
+
+## Two collection modes and the session summary (2026-09-28)
+
+`loop_order` in the plan:
+- `poses-per-rotation` (default, the 2026-09-16 dataset): all robot poses at one insect
+  rotation, then the insect is turned, 36 robot runs (`run_cycles.sh 36`).
+- `rotations-per-pose`: the arm goes to a pose and holds it while the insect does all 36
+  rotations, then the platter is turned BACK to step 0 (reverse, never a full turn forward:
+  the insect sits on a thread and would creep in height), then the next pose. ONE robot run
+  (`run_cycles.sh 1`, the coordinator passes `{cycles}` = 1). Meant for the motorised
+  turntable; with `turntable_drive: manual` the operator gets an Enter per rotation and a
+  "turn BACK" prompt per pose. Resume: finished stops are skipped, `--start-step` is ignored.
+
+Every session writes `summary.json` + `SUMMARY.md` (rewritten after every stop, final at
+the end): how the data was collected (loop order in words, turntable drive, poses,
+rotations, frames per stop, focus mode/stack, exposure incl. the EV applied, white
+balance, phone, mocap, merge settings, plan `subject` / `notes`), timing (start, end, wall
+and capture time, pauses, resumes, seconds per stop and per frame, settle waits, platter
+moves), results (stops planned/ok/skipped/failed/retried, per robot pose, complete
+rotations, frames, merged masters, raw DNGs left, GB on disk), quality (jitter, thermal
+states per frame, turntable yaw error, operator prompts, focus sources), host and
+coordinator commit. Regenerate: `python -m capture_coordinator.summary <session_dir>`.
+
+## Motorised turntable: the Portenta controller (2026-09-30)
+
+The motor will be driven by the user's controller repo
+`~/Documents/repos/phd_roberts_thesis_stepper_motor_control` (Portenta H7 + A4988 + NEMA 17,
+text serial protocol, `MOVETO`/`DONE`/`ZERO`). `turntable_drive: portenta` in the plan uses
+`PortentaTurntable` (`capture_coordinator/turntable.py`): absolute targets only, verified
+against that repo's firmware simulator. Everything is in `docs/TURNTABLE.md`; the section
+below describes the older Arduino sketch, kept as `turntable_drive: serial`.
+
+## Motorised turntable, older sketch (2026-09-28, hardware not built)
+
+Parts: NEMA 17 17HS4401 + A4988. The PC cannot pulse STEP/DIR over USB, so an
+Arduino-class board runs `hardware/turntable/turntable_a4988.ino` and the
+coordinator sends absolute platter angles over USB serial
+(`coordinator/capture_coordinator/turntable.py`; wiring, current limit, plan keys
+and the bench commands in `hardware/turntable/README.md`). Everything still
+unknown is a plan key: `turntable_steps_per_rev`, `turntable_microsteps`,
+`turntable_gear_ratio`, `turntable_direction`, `turntable_steps` (stops per
+revolution), speed and acceleration. `turntable_drive: manual` keeps the old
+Enter flow; `serial` = the motor (Enter only once, to place the insect);
+`fake` = dry run. With the motor, `turntable_confirm: enter` means no gate (yaw
+logged), `mocap`/`both` = popillia yaw gate. Tested: 3 dry-run tests with the
+fake drive + 7 protocol tests against an in-process board emulation
+(`tests/test_turntable.py`); the real board is untested until it exists.
 
 ## Status (2026-09-15)
 
@@ -82,18 +159,19 @@ spd-say/espeak/paplay/aplay/notify-send present, ROS 1 noetic sourced in
 `.bashrc`, lab NIC = USB-Ethernet `enx9cebe85dcb1d` 192.168.201.158, Motive PC
 reachable, docker0 present (harmless: ROS_LOCALHOST_ONLY=1 in the pixi env).
 
-1. Repo: from the Mac, `rsync -a --exclude .pixi --exclude build --exclude install
-   --exclude log --exclude datasets --exclude '__pycache__' ~/Documents/repos/image-capture
-   leon@192.168.201.158:~/` (the submodules travel with it; `.git` too, so the
-   branch is there). **The datasets folder `~/Documents/repos/optitrack/datasets/` on
+1. Repo: from the Mac, `bash tools/sync_to_pc.sh` = rsync (excluding .pixi, build, install,
+   log, datasets, caches) to `leon@192.168.201.158:~/shared_ws/roberts_ws/image-capture/`
+   (user's path, 2026-09-29; the submodules travel with it; `.git` too, so the branch is there). **The datasets folder `~/Documents/repos/optitrack/datasets/` on
    the Mac is never moved or rsynced** (user's rule; it is also 60 GB > 51 GB free).
-   The only files a session reads from it are the aug31 calibration YAMLs named in
-   the plan (`rig_transforms`, `calibration_files`); put read-only COPIES of those
-   eight small files on the PC, e.g. into `~/calib_aug31/` (`scp` from the Mac), and
-   point the plan there: `rig_transforms`, `calibration_files` -> `~/calib_aug31/...`,
-   `session_dir` / `output_root` -> a new folder on the PC such as `~/sessions/<name>`
-   (paths accept `~` and `$VARS`). New sessions recorded on the PC stay there;
-   whether they are copied to the Mac afterwards is the user's decision.
+   Nothing from it is needed at capture time: the calibration YAMLs named in the
+   plan (`rig_transforms`, `calibration_files`) are only copied into the session for
+   provenance and used for the optional `cam_*` columns of frames.csv; when they are
+   missing the coordinator warns and carries on, and the camera poses are computed
+   later on the Mac with `colmap_export.py --rig` (user's decision 2026-09-28: all
+   processing stays on the Mac). In the plan set `session_dir` / `output_root` to a
+   new folder on the PC such as `~/sessions/<name>` (paths accept `~` and `$VARS`);
+   the calibration paths can stay as they are. New sessions recorded on the PC stay
+   there; whether they are copied to the Mac afterwards is the user's decision.
    Budget: a full 324-stop session leaves ~24 GB of 16-bit TIFF masters plus the
    250-frame raw buffer (~6 GB) on the PC; the phone keeps the raw.
 2. `curl -fsSL https://pixi.sh/install.sh | bash` (then open a new shell), then
@@ -174,7 +252,7 @@ the plan's `start_tunnel` / `launch_app` / `record_mocap` / `dump_bodies` do it:
 ```bash
 cd optitrack && RECORD_BODIES="phone popillia" pixi run record-poses   # OptiTrack driver + bag (terminal 1)
 cd ~/Documents/repos/image-capture
-cp coordinator/plan.example.yaml coordinator/plan.yaml        # edit: robot_host, poses, focus_mode/frames_per_stop, rig_transforms, merge_*
+cp coordinator/plan.example.yaml coordinator/plan.yaml        # edit: robot_host, poses, focus_mode/frames_per_stop, turntable_drive, merge_*
 bash tools/run_coordinator.sh --plan coordinator/plan.yaml --tunnel      # terminal 2
 ```
 (`RECORD_BODIES` matters only for the bag: the record launch's default body
@@ -187,8 +265,8 @@ Robot PC (ROS 1 env, move_group up, joint-state recorder running):
 #       into src/panda_moveit_ctrl/scripts/ (they are the patched versions; robo_arm/README.md has the details)
 bash run_cycles.sh 36 _confirm_port:=5600
 ```
-The coordinator connects to the robot for every run, confirms each
-turntable step from the popillia body's mocap yaw, gates every shot on
+The coordinator connects to the robot for every run, turns the platter
+(motor) or waits for Enter / the popillia yaw (manual), gates every shot on
 stillness, with `focus_mode: auto` runs autofocus on the centre of the
 frame at every stop and shoots `frames_per_stop` frames centred on
 the result (21 frames = AF ± 10 steps; the AF frame is the merge
@@ -287,7 +365,40 @@ Stack per stop (decided 2026-09-09): 50 frames on the uniform grid 0.0..0.5
 EXACTLY one of the frames; that frame is the merge reference of the stop
 (`focus_centre` in frames.csv, `ref_focus_index` in merged_frames.csv).
 
-## Phone heat
+## Phone heat (measured 2026-09-30 on the September dataset)
+
+Of 324 stacks, 19 were shot at thermal "serious" and took 200 s each (the app's 3 s
+pause before every frame), the other 305 took 52 s: 0.7 h lost of 5.4 h shooting. The
+pace is set by the phone, not the Mac (one `stack` command, the frame loop runs in the
+app, the throttle is checked before every frame). Since 2026-09-30 every sidecar carries
+the thermal state of its own frame (`thermal`, plus `thermal_at_start`), and the plan key
+`thermal_wait_s` lets the coordinator idle after a hot stack until the phone reports
+"fair" (poll `status`), which cools faster than shooting at 3 s per frame.
+Heat sources, largest first: ProRAW multi-frame processing per capture (`phone_raw:
+bayer` removes it, `phone_quality: speed` reduces it), battery charging from the cable
+(set the iPhone's charge limit to 80 % in Settings > Battery > Charging: the battery
+stops charging and the phone runs from the cable), the continuous 1572x1178 video
+stream for the intrinsics (`phone_frame_rate`, 10 fps now; 3 fps to be measured),
+the screen (`phone_screen_brightness 0.02`, preview off), radios (airplane mode is
+fine, everything goes over USB), and the cradle insulating the back (a small USB fan
+across the top of the back, where the SoC sits, is the one physical fix).
+Bench 2026-09-30 (phone on the Mac's USB-C, charging at 65 %, ISO 80 1/100 s, quality speed,
+10 fps, preview off, brightness 0.02): ProRAW 1.15 s/frame (57 s per 50), ProRAW at 3 fps 1.67
+s/frame (slower: keep 10 fps), Bayer 0.70 s/frame (not allowed: ProRAW is a requirement).
+Six ProRAW stacks back to back with NO gap: 57, 55, 62, 64, 145, 205 s — nominal for 2 stacks,
+fair from stack 3, serious inside stack 5 (the per-frame throttle kicks in mid-stack). In a
+session the ~30 s of arm move + settle between stacks is what keeps it at "fair" most of
+the time (19 of 324 stacks hot in September). Same six stacks 40 min later with **blackout
+on, airplane mode, all apps closed, battery 90 %** (still charging): 55, 55, 60, 58, 55, 55 s,
+nominal for 4 stacks, "fair" for 5-6, never serious — no throttling at all. Those are the
+session settings now (`phone_blackout: true`). Stress test right after (start at "fair", 10
+stacks, no gap): 55, 56, 56, 55, 60, 187, 205, 87, 69, 119 s — serious from stack 6, recovering
+mid-stack (the per-frame check) and relapsing; the battery fell 90 -> 80 % on the cable because
+iOS suspends charging when hot. So: ~10 continuous stacks from a cool start before throttling,
+the 30 s session gaps stretch that, `thermal_wait_s` catches the rest, and the run must start
+at 100 %. A fan on the back is the remaining lever.
+
+## Phone heat (older notes)
 
 ProRAW processing on the phone is the main heat source (thermal "serious"
 after ~30 rapid frames). Knobs, all sent by the coordinator from the plan
@@ -320,5 +431,8 @@ robot PC (or via `robot_start_cmd`). `--resume --start-step N` continues
 after a crash.
 
 ## Open items
+- Turntable motor (2026-09-28): build it (board choice, coupling, microstepping, stops per revolution),
+  flash `hardware/turntable/turntable_a4988.ino`, bench-test with `python -m capture_coordinator.turntable cycle 36 10`,
+  then a dry session with `turntable_drive: serial` and the arm.
 - 2026-09-16 morning: pick `merge_fusion` (A vs B) from `merged_A`/`merged_B` of the 9 Sep session; `run_cycles.sh 36` on the robot PC.
 - Later: stillness thresholds from the printed jitter, the board session for Stage 3 (`tools/check_intrinsics.py`), masks + 3DGS training from `gs_upload/`.

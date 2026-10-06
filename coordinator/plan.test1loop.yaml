@@ -17,6 +17,9 @@ output_root: /Users/robertskalvitis/Documents/repos/optitrack/datasets   # unuse
 turntable_steps: 1           # ONE rotation = 9 stacks (the final test before the dataset)
 turntable_step_deg: 10.0
 turntable_yaw_tol_deg: 0.5
+turntable_drive: manual      # manual (Enter) | serial (NEMA 17 + A4988 board, hardware/turntable/README.md) | fake
+# turntable_port: auto        # serial: auto = first USB serial port; steps_per_rev 200, microsteps 16, gear_ratio 1.0,
+#                             # direction 1|-1, speed_deg_s 20, accel_deg_s2 40, hold true = defaults (plan.py)
 turntable_confirm: enter     # Enter after the manual rotation, NO yaw check (2026-09-16); the yaw is still logged per stop
 pose_confirm: false          # no Enter at the robot poses
 poses: 8                     # rows of the robot PC's manual_poses.csv (aug31 poses 1-7 + vertical)
@@ -67,17 +70,10 @@ robot_files:
   - robot/manual_poses.csv           # reference copy of the robot PC's 8 poses (aug31 poses 1-7 + vertical)
   - robot/joint_start_aug31.csv      # the initial pose (= robot PC joint_start.csv, aug31 pose 0)
 
-# --- calibrations copied into <session>/calibrations/ ----------------------------
-rig_transforms: /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/rig_transforms.yaml
+# --- files copied into <session>/calibrations/ (provenance only; the aug31 calibration YAMLs are
+#     applied AFTER the dataset is collected, on the Mac — user, 2026-09-28) -----------------------
+rig_transforms: ""           # not used at capture time: camera poses are computed later on the Mac (colmap_export.py --rig)
 calibration_files:
-  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/rig_transforms.yaml
-  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/handeye_robot.yaml
-  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/handeye_factoryK_20260831.yaml
-  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/handeye_sfm_refit.yaml
-  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/intrinsics_20260831.yaml
-  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/intrinsics_factory_20260831.yaml
-  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/calibrations/rigid_bodies_20260831.yaml
-  - /Users/robertskalvitis/Documents/repos/optitrack/datasets/aug31_20deg_9vertical/insect_axis.yaml
   - coordinator/focus_aug31.yaml
 
 # --- start / stop everything from this one command ---------------------------------
@@ -99,7 +95,7 @@ merge_fusion: pyramid        # A (Laplacian pyramid) keeps up with the capture (
                              # B can be re-run later from the phone's raw copies.
 merge_format: tif            # 16-bit sRGB TIFF master + JPEG preview
 merge_jobs: 3                # parallel merges (pyramid 105-260 s each under contention, wavelet 320-480 s)
-merge_ref_index: -1          # reference = the init-focus frame of each stop
+merge_ref_index: -1          # reference = the frame where the beetle is sharpest
 merge_delete_raw: true       # the MAC copies only, after the merged file was written and read back
 merge_index_maps: false
 merge_max_pending: 5         # <= 5 unmerged stacks (250 frames) on the Mac; the next pull waits for a finished merge

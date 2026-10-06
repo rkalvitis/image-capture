@@ -35,7 +35,11 @@ optitrack/          THE FORMER ~/Documents/repos/optitrack REPO, merged 2026-09-
                     src/optitrack_msgs (https) and vendor/hand_eye_calibration. datasets/, calibration photos
                     and bags, docs/, thesis/, 3dprinter/ are git-ignored and STILL LIVE in the old folder
                     ~/Documents/repos/optitrack/ (user's decision) -> plan paths point there.
-tests/              test_dry_run.py, test_stack_merge.py, test_colmap_export.py — must stay green
+hardware/turntable/ turntable_a4988.ino (Arduino-class board: NEMA 17 17HS4401 + A4988, USB serial line protocol)
+                    + README (wiring, current limit, plan keys). Coordinator side: capture_coordinator/turntable.py
+                    (SerialTurntable / FakeTurntable / FakeBoardTransport). Hardware not built yet (2026-09-28).
+                    summary.py = session summary (summary.json + SUMMARY.md) from the session files.
+tests/              test_dry_run.py, test_stack_merge.py, test_colmap_export.py, test_turntable.py — must stay green
                     (merge/export tests need opencv: run with the pixi env or a venv from requirements-merge.txt)
 docs/               plan, protocol, decisions
 ```
@@ -119,6 +123,34 @@ A quick compile check without the phone: add `CODE_SIGNING_ALLOWED=NO` and
 - Focus breathing measured on the rig (stop 1 of 9 Sep): scale 0.972 (lens 0.0)
   .. 1.032 (lens 0.5) relative to lens 0.255; Apple's fx ratio overpredicts
   it by ~25 % -> keep the ECC alignment, intrinsics only as the seed.
+- Merge anchor (2026-10-06, user): the reference frame = the frame where the BEETLE is sharpest, measured on
+  the unwarped frames inside a beetle mask (box per frame + dark silhouette vs the box border, pin cut,
+  OR over frames, dilated; `beetle_sharpness`, `<image>_beetle_mask.png`); warps use Lanczos. Before, the
+  never-warped middle frame k25 won the fusion because bilinear warps kept only 0.47-0.64 of the fine
+  detail -> soft masters (92/250 dataset stops "sharpest" at k25). Test: 5 stops 1.4x sharper on the beetle,
+  `dataset_popillia_2026-09-30/derived/anchor_test_2026-10-06/compare/`. Merge ~100-150 s (3 jobs).
+  SAM 3 masks (user, 2026-10-06): `--mask sam3` / plan `merge_mask: sam3` (plan.dataset.yaml) = SAM 3 text prompt
+  "insect" (`capture_coordinator/sam3_mask.py`, optitrack `masking` env, facebook/sam3 in the HF cache, MPS) on the
+  provisional sharpest frame, then all frames re-scored inside it; one SAM 3 at a time (`<session>/sam3.lock`,
+  19 GB RAM), ~15-25 s per stop; failure -> threshold mask, `mask_method` column. Writes `<image>_sam3_mask.png`.
+- Merge quality (2026-10-06, tests on 5 stops, `dataset_popillia_2026-09-30/derived/blur_causes_2026-10-06/` + README):
+  (1) alignment is fitted on the beetle (`--align-on beetle`, default; ECC on a crop around the mask, ~110-150 s per
+  stop): fitted on the whole frame the beetle drifted up to 4 px and its near end came out black and smeared;
+  (2) `--fusion-space srgb` (opt-in): fusion on gamma-encoded values; in linear the foam edge (80 %) outweighs the
+  beetle (1 % linear), the merge crushed the beetle's blacks to 0 and darkened it 20-40 % against the single photo;
+  (3) `--depth-guard 4` (opt-in, pyramid only): a pixel takes detail only from photos within 4 focus steps of its own
+  sharpest photo (`focus_depth_map`, `<image>_depth.png`): removes the grey band along the outline and the
+  star-shaped dust (lens astigmatism: vertical dash before focus, horizontal after). Best tested = sam3 + srgb +
+  guard 4; NOT yet the default and no plan keys (user has not chosen). Wavelet fusion and dropping blurry photos
+  (`--min-rel-sharpness`) were not better. The Laplacian variance cannot rank MERGED images (artefacts count as
+  detail: merged = 2.4x the best single photo per tile); it is only used to pick the anchor. The single photos are
+  the limit: beetle ~770 px wide, at ~1 % linear, no photo shows fine texture on the dark body.
+- Full re-merge on a Windows PC (user, 2026-10-06: gamma-space fusion chosen): `tools/remerge_windows.py --raw
+  <OneDrive>/SUPSI/dataset_popillia_2026-09-30/raw --out <the user's folder>` = every stop of the flat cloud raw/
+  (468 x 50, 351 GB; rows built from the sidecars, `raw_dir` key in frame_path) -> `<out>/stacked|previews|stack_meta|
+  masks`, srgb + guard 4 + beetle align, built-in threshold mask by default (SAM 3 optional via --sam3-python),
+  resume by re-running, cloud-only files made cloud-only again after each stop, never deletes. Smoke-tested on the
+  Mac with 2 local stops (107 s per stop); NOT yet run on Windows (`_CsvLock` got an msvcrt branch, untested).
 - Exposure: `locked` meters the white foam to middle grey -> the beetle sits at
   2 % linear. The session-start exposure check (`exposure_check`) applies an
   EV as a CUSTOM exposure (shutter first). What Preview shows for a ProRAW is
@@ -144,6 +176,25 @@ linear TIFF, export renders lossless PNG;
 exposure/WB modes auto | locked (dataset default) | custom; phone never
 deletes files; thermal warn+throttle; failed stop after 2 retries → ask the
 operator; USB only; stillness thresholds tuned by experiment (printed).
+
+## Decisions 2026-09-28 (user)
+
+- **No calibration at capture time.** The aug31 hand-eye / intrinsics / rigid-body YAMLs are
+  applied afterwards on the Mac when the dataset is processed. Every plan has
+  `rig_transforms: ""` and no dataset paths in `calibration_files` (only the repo's focus
+  table is copied); the coordinator warns and continues if a rig file is missing.
+- **Two collection modes** (`loop_order`): `poses-per-rotation` (turntable outer, as in the
+  2026-09-16 dataset) and `rotations-per-pose` (arm holds a pose for all 36 rotations, then the
+  platter REVERSES to step 0 so the insect does not creep on its thread, one robot run).
+  `plan.loop_order_text()` is the sentence that goes into the summary.
+- **Session summary**: `summary.json` + `SUMMARY.md` in every session folder
+  (`capture_coordinator/summary.py`, rewritten after each stop; `python -m
+  capture_coordinator.summary <dir>` regenerates). Plan keys `subject`, `notes` feed it.
+- **Motorised turntable**: NEMA 17 17HS4401 + A4988, connected to the computer via USB
+  through an Arduino-class board (the PC cannot pulse STEP/DIR itself). `turntable_drive:
+  manual | serial | fake`; stops per revolution, microstepping, gear ratio and direction are
+  plan keys because the user has not decided them yet. Enter stays only for placing the insect.
+  With the motor `turntable_confirm: enter` = no gate, `mocap`/`both` = yaw gate.
 
 ## Full dataset (prepared 2026-09-15 for 2026-09-16)
 
@@ -172,7 +223,165 @@ notifications for every prompt (`notify`); robot script has a debug walk
 `turntable_confirm: enter`, `pose_confirm: true` (Enter / lens value at every
 pose), `--mocap none` possible. `robot_host` still to be set.
 
-## STATE 2026-09-28 (read this first)
+## STATE 2026-09-30 (read this first)
+
+- **Back to the Mac as coordinator + merger + uploader (user, 2026-09-30)**: the Ubuntu PC merges a
+  50-frame stack in ~10 min CPU (Mac 90 s) — too slow. The PC runs only the robot script
+  (`run_cycles.sh N _confirm_port:=5600`, `robot_host: 192.168.201.158`), as in the 2026-09-16
+  dataset; phone on the Mac's USB-C, mocap bag from the Mac, rclone remote `onedrive` on the Mac
+  (13.7 MB/s). Open questions asked, not yet answered: OneDrive client on the Mac (Files On-Demand
+  vs full download of SUPSI/), Wi-Fi internet in the lab, Mac session folder (~/sessions/<name>?)
+  + delete at the end, robot run logs (manual scp vs rsync over the user's ssh key), next run name.
+  **Answers 2026-09-30**: OneDrive app on the Mac = Files On-Demand (cloud-only, fine); the lab
+  Ethernet gives the Mac internet (same IPs as before); sessions in `~/Documents/repos/optitrack/datasets/<name>`,
+  kept as a folder but `upload_delete_local: true` (user changed it 2026-09-30 afternoon: masters must not stay on the Mac either; images/ emptied after the verified upload, ~60 MB of session files remain; mactest images/ verified against the cloud and emptied by hand); robot run logs copied by hand;
+  exposure ISO 80 1/100 s fixed + exposure_check; first run = `plan.mactest.yaml` (mactest_2026-09-30,
+  2 rotations WITH the Portenta motor, p0..p8, 50 frames) + `docs/MAC_RUNBOOK.md`.
+- **ProRAW is a requirement** (user). Bench 2026-09-30 (phone on the Mac, ISO 80 1/100 s, quality
+  speed, preview off, brightness 0.02): ProRAW 10 fps 1.15 s/frame (57 s per 50), ProRAW 3 fps
+  1.67 s/frame (slower! keep 10 fps), Bayer 0.70 s/frame (not allowed). ProRAW DNG 29 MB on the
+  bench scene vs 9 MB on the white-foam dataset. September dataset: 19 of 324 stacks at "serious"
+  took 200 s each (3 s per frame), 0.7 h of 5.4 h lost; the user sees heat start after ~6 stacks. Bench 2026-09-30, six stacks with no gap, charging at
+  65 %: 57, 55, 62, 64, 145, 205 s (fair from stack 3, serious inside stack 5); idle cool-down
+  serious->nominal measured in scratchpad heat_cool.log (see README "Phone heat").
+- **Heat work done**: sidecar `thermal` is now per frame (+ `thermal_at_start`; app rebuilt on
+  the Mac 2026-09-30, install pending), plan `thermal_wait_s` = before every stack poll the phone's
+  status and idle (5 s polls, max N s) while it is serious/critical. Suggestions to the user:
+  iPhone charge limit 80 % (Settings > Battery > Charging; charging at 60 % was on during the bench),
+  a small fan across the top of the phone's back, airplane mode (all USB anyway).
+- **Blackout mode (user, 2026-09-30: "the screen can be black, i don't care about anything there")**:
+  hello/ui `blackout: true` -> the app draws only Color.black, preview off, brightness 0; `bye` or a
+  2 s long-press on the phone restores the UI. Plan `phone_blackout: true` in example/sep15/ubuntu_test.
+  App rebuilt + installed 2026-09-30 11:00 with blackout + per-frame thermal (verified: sidecars carry
+  `thermal` per frame + `thermal_at_start`). Idle cool-down measured: serious -> fair in < 4 min
+  after the last frame, then "fair" persists (> 8 min, still charging 75-80 %); `thermal_wait_s: 240`. **Second bench with blackout + airplane mode + battery 90 % + apps closed:
+  55, 55, 60, 58, 55, 55 s, nominal x4 then fair, never serious** (vs 145/205 s in the morning run
+  at 65 % charging with the UI on). 10-stack stress test from "fair": 55, 56, 56, 55, 60, 187, 205,
+  87, 69, 119 s, battery 90 -> 80 % on the cable (iOS suspends charging when hot). Each stop now
+  logs a `phone_status` event (thermal, battery, charging) via `_thermal_wait`.
+- **Mac test run 2026-09-30 14:36 (mactest_2026-09-30, running)**: the first attempt was killed before the
+  frames.csv header was flushed, the resume appended rows to the empty file -> every inline merge died
+  with KeyError 'stop' (raw kept locally + in the cloud, phone emptied, nothing lost). Fixed live:
+  `session.read_frames_csv` tolerates a header-less file (merge, poses_collect, summary use it), the
+  writer flushes the header and writes it into an empty file; stops 0-3 merged by hand; new recovery
+  command `python -m capture_coordinator.upload_worker <session> --stops ...` re-runs a stop's final
+  upload phase (masters -> cloud, local raw deleted per plan). Upload 21 MB/s from the lab.
+- **mactest_2026-09-30 RESULT** (18/18 stops, 900 frames, all in OneDrive: raw 1800, stacked/previews/
+  stack_meta 18, poses + 3 bags; phone emptied 1800 files; 0 dng left on the Mac after the recovery upload
+  of the 5 hand-merged stops; 15 GB, 25 min): capture 54 s per stack, pull 23 s, raw upload 36-45 s at
+  19 MB/s, merge 84-188 s (3 jobs), stack-to-stack 67-69 s, one 273 s gap (motor turn + robot run 2),
+  no buffer wait, thermal nominal->fair only. Mocap: every frame has both body poses; popillia yaw 27.1
+  (rot 0) / -114 (rot 1), jitter 0.5-1.4 mm; motor +180 deg -> yaw -140.7 deg (direction inverted, ratio
+  ~1.3: mechanical, user's side); after the reverse the insect yaw was 17.2 vs 27.1 at the start.
+  Images DARK (ISO 80 1/100 s copied from aug31; foam p99 0.40 sRGB) -> `exposure_check_ev: auto`
+  (foam p99 -> 0.85 sRGB, +2.4 EV today). p3's sharpest frame = last of the stack (focus range end).
+- **Rehearsal plan** `coordinator/plan.rehearsal.yaml` (the run before the dataset; user's inputs 2026-09-30):
+  4 rotations x 90 deg, poses-per-rotation, p0 + the robot's 12 NEW poses = 13 stops per rotation, 52 stacks
+  (user 2026-09-30 evening); the robot runs WITHOUT the obstacle scene: `run_cycles.sh 4 _confirm_port:=5600
+  _obstacles:=false` on the PC (robot-side parameter, nothing in the coordinator), 50 frames on the FIXED range 0.0-0.5 (`focus_mode: range`, no AF: the popillia
+  is not guaranteed centred), auto EV check, blackout, upload all / delete raw+phone, dataset kept.
+  `{date}` in name / session_dir / upload_remote = the day the plan is loaded (Plan.load). Before it:
+  coupling glued -> `turntable_direction` from the measured sign; new manual_poses.csv on the PC (copy into
+  robot/); beetle at 55 cm (`_object_height:=0.55`). Then the dataset plan = the same with 36 rotations.
+- **Rehearsal 2026-09-30 evening (killed by the user at 46/52 stops, local folder deleted; cloud copy
+  rehearsal_2026-09-30 has 42 stops)**: glue fixed the ratio (+90 commanded -> yaw -89.9/-89.6/-86.0: direction
+  inverted, turn 3 four deg short), 55 s per stack, all frames "fair", 69 s stop-to-stop, 130 s per rotation
+  change, auto EV applied -0.3, upload 17 MB/s, 4100 files deleted on the phone; the last ~4 stops' raw stayed on
+  the phone (session 20260930_17xx) and exists nowhere else.
+- **THE DATASET PLAN `coordinator/plan.dataset.yaml`** (2026-09-30): rehearsal settings + 36 x 10 deg,
+  `turntable_direction: -1`, name/folder/remote dataset_popillia_{date}, 468 stops, 23 400 frames, ~195 GB raw
+  + 28 GB masters to OneDrive (836 GB free), ~10.5 h; nothing stays on the Mac or the phone. PC: `run_cycles.sh 36
+  _confirm_port:=5600 _obstacles:=false`.
+- **DATASET RUN dataset_popillia_2026-09-30 (started 19:45, running 2026-10-01 morning)**: capture fine
+  (55 s/stack, 69 s/stop, all "fair", motor dir -1 OK), but the pipeline fell behind: the uploader slows as
+  cloud raw/ grows (every rclone call lists all 21k files, 4x per stop -> 287 s/stop at stop 214 vs 69 s
+  capture), capture ran ~157 stops ahead, those wait on the phone (session 20260930_194518). CONSEQUENCE:
+  mocap history is 30 s (`Ros2MocapSource(history_s=30)`), so every stop finalized late has EMPTY body-pose
+  columns in frames.csv (184 of 218 by stop 217). Recoverable: the rosbag mocap/bag_20260930_194523 records
+  both bodies all session; sidecars/captured events hold t0/t1. User's decision: stop with Ctrl-C x2 once the
+  capture is complete (NOT kill -9: the bag must get its SIGINT via launcher.stop), finish offline later.
+  **MOCAP LOSS, my fault**: at 06:53:18 the bag recorder died ("SQLite error (5): database is locked") because
+  I ran a sqlite3 count on the live .db3; the bag covers 19:45:26-06:53:18 (7.78 M msgs, stops 0..~377);
+  rotations 29-35 (stops ~378-467, 90 stops) have NO mocap anywhere. No metadata.yaml (crash) -> `ros2 bag
+  reindex` recreates it. Options: derive poses as in September (camera from the repeated robot joints, insect
+  from the EXACT motor angles) or re-shoot rotations 29-35 with mocap (~2 h). Capture finished 09:32:05
+  (468 stops); user stops the drain with Ctrl-C x2 and finishes offline.
+  PENDING, NOT BUILT (user: "dont build them yet", 2026-10-01): (1) offline drainer: pull the un-pulled
+  stops (captured events minus stop_ok), rebuild their frames.csv rows from sidecars + robot_poses.csv, merge
+  (stack_merge --stops), upload (upload_worker --stops), delete on the phone; (2) fill body poses from the bag
+  for ALL stops -> derived/frames_filled.csv + poses/mocap/<image>.csv (reuse optitrack/scripts/match_photos.py
+  load_pose_track, header stamps = Mac time, same as the live source); (3) uploader per-stop cost: rclone
+  --files-from + --no-traverse, no raw re-check in the final phase; (4) pull waits for a disconnected phone
+  instead of failing the stop; (5) snapshot the mocap window at capture time (in _capture), not at pull time.
+- **Turntable = the user's Portenta stepper repo** (`~/Documents/repos/phd_roberts_thesis_stepper_motor_control`,
+  unfinished): `turntable_drive: portenta` -> `PortentaTurntable` speaks its protocol directly (PING/INFO/
+  ZERO/MOVETO+DONE/STATUS/SPEED/ACCEL/ENABLE, microsteps, absolute only), `FakePortentaTransport` for the
+  tests, dry-run test `test_portenta_turntable_full_loop`, end-to-end OK against the repo's firmware
+  simulator (PlatformIO via `pipx install platformio`, `~/.local/bin/platformio`; the `pio` on PATH is a
+  broken unrelated package). docs/TURNTABLE.md. Gear ratio / direction / microstepping / zero still open.
+  **Real board tested 2026-09-30** (branch motor-and-wiring-update, /dev/cu.usbmodem2101, only wiring +
+  motor model changed, protocol same): coordinator loop with the real motor OK, 36 x 10 deg = exactly
+  3200 microsteps, reverse 360 deg 18 s; user confirmed it moved. Decisions in docs/TURNTABLE.md
+  ("How it rotates and moves"): absolute MOVETO, yaw-increasing = positive, 20 deg/s, 40 deg/s2, hold on,
+  zero at Enter, gear 1.
+  **Early turn** (user, 2026-09-30, "motor rotations can start as soon as images finish"): poses-per-rotation
+  starts the next step's motor move in a thread right after the last stack of a rotation (`_start_pre_turn`,
+  event `turntable_early`), the next `_wait_turntable` joins it. Slip in the first run = coupling, hot glue.
+  **Every revolution is undone backwards** (user, 2026-09-30): rotations-per-pose already returned to 0
+  per pose; poses-per-rotation now sends `goto(0)` after the last rotation of the session (manual platter:
+  one Enter "turn it BACK"), event `turntable_return` pose="session". The angle per step = 360/N from the
+  plan / start prompt, absolute targets `s*360/N`.
+- Exposure reference: aug31 dataset (Reeflex) = 1/100 s, ISO 50-100 (median ~80); 9 Sep phone
+  auto = ISO 125 1/100 s; Sep dataset fixed ISO 38 1/15 s (user did not like it). Proposal ISO 80
+  1/100 s fixed + exposure_check.
+
+## STATE 2026-09-29 (superseded where the 2026-09-30 block says so)
+
+- **OneDrive upload implemented** (`capture_coordinator/upload_worker.py`, `docs/ONEDRIVE.md`):
+  per stop after the merge `rclone copy` + `rclone check --one-way`, then (plan
+  `upload_delete_local` / `upload_delete_phone`) the dng/tif on the PC and the DNG+JSON on the
+  phone are deleted — only after the verified copy; failed merge → upload, no deletion; failed
+  upload ×3 → stop stays local + on the phone. `upload_what all|masters|raw`; `raw|all` needs
+  `merge_delete_raw: false`. Session files, `poses/`, mocap bag (→ `poses/mocap_bag/`) synced.
+  Cloud layout (user, 2026-09-29, = OneDrive-USI/SUPSI/dataset_popillia_15_09_2026_FS): `raw/` flat
+  dng+json, `stacked/` tif, `previews/`, `stack_meta/`, `poses/` ...; locally images/<image>/stack/ stays.
+  Phone delete = `pull_worker.py delete` (AFC rm, verified with exists). Two phases since the
+  first PC run (2026-09-29 midday, user: "upload every time images get transferred"): raw phase right
+  after the pull (parallel to the merge, phone deleted then), final phase after the merge (master,
+  local deletion). The PC ran the first test with the old one-phase order -> re-sync needed. rclone installed on the
+  Mac (brew, 1.75); **token created 2026-09-29** (tenant consent OK), remote `onedrive` in
+  `~/.config/rclone/rclone.conf` on the Mac (business drive, 897 GB free), forced refresh OK,
+  hourly refresh check running until ~2026-09-30 16:00 (`~/.config/rclone/refresh_check.log`),
+  13.7 MB/s from the Mac. PC: copy rclone.conf with scp (docs/ONEDRIVE.md 2b).
+- **`<session>/poses/`** (`poses_collect.py`): stops.csv / turntable.csv / robot_poses.csv /
+  mocap/<image>.csv / robot_runs/ (robot scripts' `manual_poses_<ts>.csv`, `joint_states_<ts>.db`
+  via plan `poses_collect` globs). User's wish: all mocap + robot pose outputs in one subfolder.
+- **Start questions** in `coordinator.main()`: rotations per revolution (`Plan.set_turntable_steps`
+  → step exactly 360/N, `turntable_precision()` prints microstep resolution / worst rounding;
+  firmware rounds absolute targets), session folder (size + free space), OneDrive remote
+  (pre-flight). `--no-ask` / `--auto-operator` / `--rotations --session-dir --remote` skip them.
+- **Unattended end (user, 2026-09-29 midday)**: after the verified final upload of a stop with
+  `upload_what all` the WHOLE local `images/<image>/` folder is removed (sidecars too); the test plan
+  has `stop_confirm: false`; the final sync (mocap bag -> poses/mocap_bag) runs in `main()` AFTER
+  `launcher.stop()` closed the bag; `upload_delete_session: true` then deletes the whole session
+  folder on the PC once `rclone check` verified the final sync, every captured stop was uploaded and
+  images/ is empty (`delete_session_folder`, prints KEPT + reason otherwise). Test plan: p0..p8 =
+  `shoot_initial_pose: true` + `poses: 8` (the robot has 8 rows), `merge_jobs 6`, buffer 20.
+- **First PC run 2026-09-29 (old one-phase code)**: capture 55 s + pull 36 s per stop fine; merge
+  ~10 min CPU per 50-frame stop on the i9 (Mac 90 s), <1 GB RAM each, 3 jobs at nice 19 -> merges
+  lag, buffer stalls the capture. Exact times from the `[merge] ok in NNNs` lines still to be pasted.
+- **Motor NOT part of the Ubuntu test** (user, 2026-09-29: the NEMA 17 board has not arrived; the
+  motor stays planned). The test plan runs `turntable_drive: manual`; the 360/N even split and the
+  precision report are prepared for the motor and only printed with `serial|fake`.
+- **Ubuntu test**: `plan.ubuntu_test.yaml` (1 rotation × 9 vertical poses × 50 frames, upload all,
+  delete both) + `docs/UBUNTU_TEST_RUNBOOK.md`; `tools/sync_to_pc.sh` → PC path
+  `~/shared_ws/roberts_ws/image-capture/` (user, 2026-09-29). NOT yet run on the PC.
+- App rebuilt/reinstalled 2026-09-29 (profile expires ~2026-10-06); the developer had to be
+  re-trusted on the phone after the reinstall.
+- Tests: 51 green in the pixi env (dry run 22, upload 11, turntable 7, merge 5, export 6).
+  Nothing committed yet (all of 2026-09-28/29 is uncommitted on `image-capture-pipeline`).
+
+## STATE 2026-09-28 (superseded by 2026-09-29 for upload/poses; still valid)
 
 - **Branch `image-capture-pipeline`** (master = the old two-commit state): first commit = the
   whole working tree of 2026-09-28 (+ .gitignore, pyc/xcuserstate untracked), then the
@@ -192,8 +401,10 @@ pose), `--mocap none` possible. `robot_host` still to be set.
 - **Mac stays the app build machine**: free Apple ID -> reinstall from Xcode every 7 days.
 - **Datasets stay in `~/Documents/repos/optitrack/datasets/` on the Mac, NEVER moved or
   rsynced** (user's rule, repeated 2026-09-28; also 60 GB > 51 GB free on the PC). The plan
-  files keep those absolute paths. On Ubuntu: read-only copies of the eight aug31
-  calibration YAMLs (e.g. `~/calib_aug31/`), new sessions into a new folder on the PC.
+  files keep those absolute paths. On Ubuntu nothing from that folder is needed: the
+  calibration YAMLs are optional at capture time (missing -> warning, `cam_*` columns
+  computed later on the Mac with `colmap_export.py --rig`); new sessions go into a new
+  folder on the PC. All processing (poses, export) stays on the Mac (user, 2026-09-28).
 
 ## STATE 2026-09-18 (superseded by 2026-09-28 for the repo layout; data facts still valid)
 

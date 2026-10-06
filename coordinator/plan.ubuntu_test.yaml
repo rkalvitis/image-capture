@@ -1,0 +1,115 @@
+# UBUNTU TEST RUN (prepared 2026-09-29, docs/UBUNTU_TEST_RUNBOOK.md): everything on the robot PC.
+# 1 insect rotation x 9 stops (init pose p0 + 8 robot poses p1..p8) x 50 frames, merged on the PC during the run,
+# every stop uploaded to OneDrive (rclone), verified, then deleted from the PC AND the phone;
+# poses (mocap, robot joints, robot run logs) in <session>/poses/ and <remote>/poses/.
+#
+#   bash tools/run_coordinator.sh --plan coordinator/plan.ubuntu_test.yaml
+#
+# The command asks at start (Enter = the value below): number of insect rotations (1),
+# the session folder, the OneDrive destination. No robot arm? Start robot/fake_robot.py instead.
+name: ubuntu_test
+subject: "test specimen"
+notes: "first run on the Ubuntu robot PC: robot poses + OneDrive upload + delete after verified upload"
+session_dir: ""                  # asked at start; default = output_root/<name>_<date>
+output_root: ~/sessions
+
+# --- geometry -----------------------------------------------------------------------
+turntable_steps: 1               # ONE insect rotation (the start prompt can change it: step = 360/N deg)
+turntable_step_deg: 360.0
+turntable_yaw_tol_deg: 0.5
+loop_order: poses-per-rotation
+turntable_drive: manual          # serial once the NEMA 17 board exists (hardware/turntable/README.md)
+turntable_confirm: enter         # Enter once (insect placed); no yaw gate
+pose_confirm: false
+poses: 8                         # the robot PC's manual_poses.csv has 8 rows (first PC run 2026-09-29)
+shoot_initial_pose: true         # + a stack at the initial pose = p0 -> images p0..p8, 9 per rotation (user, 2026-09-29)
+lens_position_initial: 0.3333    # init focus of p0
+lens_position: [0.2510, 0.3412, 0.1961, 0.1020, 0.1569, 0.3098, 0.1608, 0.2392]   # per pose 1..8 (focus_mode pose)
+focus_mode: pose                 # stack around lens_position[k]; `table` needs the yaw/pose mapping of this pose file
+frames_per_stop: 50
+focus_stack_step: 0
+focus_stack_start: 0.0
+focus_stack_end: 0.5
+settle_ms: 300
+settle_after_move_s: 10.0
+thermal_wait_s: 240              # bench 2026-09-30: serious -> fair takes < 4 min idle; the phone stays "fair" while charging
+
+# --- exposure / colour ----------------------------------------------------------------
+exposure_mode: custom            # fixed as in the 2026-09-16 dataset
+exposure_check: false
+exposure_iso: 38
+exposure_duration_s: 0.0667
+wb: {mode: locked}
+
+# --- stillness (mocap) -----------------------------------------------------------------
+stillness_gate: false
+still_window_s: 1.0
+still_phone_mm: 0.1
+still_popillia_mm: 0.1
+still_timeout_s: 15.0
+max_retries: 2
+
+# --- phone --------------------------------------------------------------------------------
+phone_raw: proraw
+phone_quality: speed
+phone_frame_rate: 10
+phone_screen_brightness: 0.02
+phone_preview: false
+phone_blackout: true             # plain black screen during the session (user, 2026-09-30)
+phone_host: 127.0.0.1
+phone_port: 5601
+phone_bundle_id: ch.idsia.capture
+
+# --- robot (same PC) -----------------------------------------------------------------------
+robot_host: 127.0.0.1
+robot_port: 5600
+robot_start_cmd: ""              # start `bash run_cycles.sh 1 _confirm_port:=5600` in the ROS 1 terminal by hand
+robot_files:
+  - robot/manual_poses.csv
+  - robot/joint_start_aug31.csv
+# files the robot scripts write on this PC -> <session>/poses/robot_runs/ (and <remote>/poses/robot_runs/):
+# panda_manual_poses.py run log manual_poses_<ts>.csv, record_joint_states.py joint_states_<ts>.db.
+# CHECK the scripts folder on the PC (the sep15 plan used /home/leon/shared_ws/SynthVLA/src/panda_moveit_ctrl/scripts)
+poses_collect:
+  - ~/shared_ws/SynthVLA/src/panda_moveit_ctrl/scripts/manual_poses_*.csv
+  - ~/shared_ws/SynthVLA/src/panda_moveit_ctrl/scripts/joint_states_*.db
+  - ~/shared_ws/roberts_ws/robot/manual_poses_*.csv
+  - ~/shared_ws/roberts_ws/robot/joint_states_*.db
+
+# --- calibration: none at capture time (applied later on the Mac) ---------------------------
+rig_transforms: ""
+calibration_files: []
+
+# --- start / stop everything ----------------------------------------------------------------
+start_tunnel: true               # pymobiledevice3 usbmux forward 5601 (usbmuxd)
+launch_app: true                 # needs `sudo pymobiledevice3 remote tunneld` in another terminal, else tap the icon
+record_mocap: true               # pixi run record-poses -> <session>/mocap/ (-> OneDrive poses/mocap_bag/ at the end)
+mocap_bodies: "phone popillia"
+dump_bodies: true
+optitrack_repo: optitrack
+stop_confirm: false              # unattended: no Enter at the end — bag + tunnel stop, final sync (mocap bag) runs, exit
+notify: true
+notify_repeat_s: 45
+
+# --- merge on the PC during the run ----------------------------------------------------------
+merge_inline: true
+merge_fusion: pyramid
+merge_format: tif
+merge_jobs: 6                    # first PC run 2026-09-29: ~10 min CPU per 50-frame merge (Mac: 90 s), <1 GB RAM each, 8 cores
+merge_ref_index: -1
+merge_delete_raw: false          # the UPLOAD deletes the raw after the verified cloud copy (not the merge)
+merge_index_maps: false
+merge_max_pending: 20            # up to 20 stops (~16 GB) on disk waiting for merge + upload; the raw is in the cloud long before
+merge_python: ""
+
+# --- OneDrive upload (docs/ONEDRIVE.md) ----------------------------------------------------------
+upload_remote: "onedrive:SUPSI/ubuntu_test_2026-09-29"   # rclone remote:path; asked at start ('-' = no upload)
+upload_what: all                 # raw DNGs + sidecars + merged masters + previews
+upload_delete_local: true        # after `rclone check` passed: dng/tif/jpg removed from the PC
+upload_delete_phone: true        # ... and the DNG + sidecar removed from the phone
+upload_rclone: rclone
+upload_transfers: 4
+upload_bwlimit: ""
+upload_timeout_s: 7200
+upload_max_pending: 0            # 0 = merge_max_pending
+upload_delete_session: true      # at the end, after the verified final sync: the whole ~/sessions/<name> folder is removed

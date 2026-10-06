@@ -1,0 +1,122 @@
+# REHEARSAL = the run before the real dataset (prepared 2026-09-30, docs/MAC_RUNBOOK.md applies).
+# Mac = coordinator + focus stacker + OneDrive uploader; robot PC = the robot script only.
+# 4 insect rotations (motor, 90 deg each, reverse to 0 at the end) x 13 stops (p0 at the initial pose +
+# the robot's 12 poses; the robot's file decides the count) x 50 frames on the fixed range 0.0..0.5
+# (no autofocus: the popillia is not guaranteed to be in the frame centre) = 52 stacks. {date} = the day you run it.
+# The ROBOT ignores the obstacle scene (user, 2026-09-30): on the PC start the runs with
+#   bash run_cycles.sh 4 _confirm_port:=5600 _obstacles:=false
+# (run_cycles.sh sets _execute:=true _confirm_via:=socket itself; _confirm_via:=none is the debug walk without the coordinator).
+#
+#   bash tools/run_coordinator.sh --plan coordinator/plan.rehearsal.yaml
+#
+# Before the run: coupling glued (then set turntable_direction to the sign the last run measured),
+# new robot poses recorded on the PC (manual_poses.csv), robot at 55 cm beetle height, phone at
+# 100 % + airplane mode, Motive streaming both bodies.
+name: rehearsal_{date}
+subject: "popillia japonica, pinned (rehearsal)"
+notes: "rehearsal before the dataset: new robot poses, glued coupling, blackout, auto EV, fixed focus range"
+session_dir: ~/Documents/repos/optitrack/datasets/rehearsal_{date}
+output_root: ~/Documents/repos/optitrack/datasets
+
+# --- geometry -----------------------------------------------------------------------
+turntable_steps: 4               # 4 x 90 deg (the start prompt asks; 36 for the dataset; step = 360/N exactly)
+turntable_step_deg: 90.0
+turntable_yaw_tol_deg: 0.5
+loop_order: poses-per-rotation   # all robot poses at one insect rotation, then the motor turns, repeat; reverse at the end
+turntable_drive: portenta
+turntable_port: auto
+turntable_steps_per_rev: 200
+turntable_microsteps: 16
+turntable_gear_ratio: 1.0        # direct drive after the glue; set from the measured yaw per commanded degree if not 1
+turntable_direction: 1           # SET AFTER THE GLUE: -1 if the popillia yaw decreased for a positive motor move (2026-09-30: inverted)
+turntable_speed_deg_s: 20.0
+turntable_accel_deg_s2: 40.0
+turntable_hold: true
+turntable_confirm: mocap         # yaw waited for (bounded) and recorded after every motor move, never a prompt
+pose_confirm: false
+poses: 12                        # the robot's manual_poses.csv rows (the robot's count wins at run time)
+shoot_initial_pose: true         # + p0 at the initial pose
+lens_position_initial: 0.25      # unused with focus_mode range (kept for the record)
+lens_position: [0.25]            # one value = replicated to every pose; unused with focus_mode range
+focus_mode: range                # fixed 50 positions 0.0..0.5 at every stop (user, 2026-09-30); merge reference = the frame where the beetle is sharpest
+frames_per_stop: 50
+focus_stack_start: 0.0
+focus_stack_end: 0.5
+focus_stack_step: 0
+settle_ms: 300
+settle_after_move_s: 10.0
+thermal_wait_s: 240
+
+# --- exposure / colour --------------------------------------------------------------
+exposure_mode: custom            # starting point ISO 80 1/100 s; the check measures the light and proposes the EV
+exposure_iso: 80
+exposure_duration_s: 0.01
+exposure_check: true
+exposure_check_ev: auto          # Enter applies the EV that puts the white foam (frame p99) at 0.85 sRGB (+2.4 on 2026-09-30)
+exposure_max_duration_s: 0.5
+wb: {mode: locked}
+
+# --- stillness (mocap) ----------------------------------------------------------------
+stillness_gate: false
+still_window_s: 1.0
+still_phone_mm: 0.1
+still_popillia_mm: 0.1
+still_timeout_s: 15.0
+max_retries: 2
+
+# --- phone ------------------------------------------------------------------------------
+phone_raw: proraw
+phone_quality: speed
+phone_frame_rate: 10
+phone_screen_brightness: 0.0
+phone_preview: false
+phone_blackout: true
+phone_host: 127.0.0.1
+phone_port: 5601
+phone_bundle_id: ch.idsia.capture
+phone_device_id: F69E5036-B4BE-5579-B8CD-DDC135DF373F
+
+# --- robot (the PC over the lab LAN) ---------------------------------------------------
+robot_host: 192.168.201.158
+robot_port: 5600
+robot_start_cmd: ""              # on the PC: bash run_cycles.sh 4 _confirm_port:=5600 _obstacles:=false   (no obstacle scene, user 2026-09-30)
+robot_files:
+  - robot/manual_poses.csv       # keep this copy in sync with the PC's new pose file (robot/ = reference copy)
+  - robot/joint_start_aug31.csv
+poses_collect: []                # robot run logs copied by hand afterwards (docs/MAC_RUNBOOK.md)
+
+# --- calibration: none at capture time ---------------------------------------------------
+rig_transforms: ""
+calibration_files: []
+
+# --- start / stop everything ---------------------------------------------------------------
+start_tunnel: true
+launch_app: true
+record_mocap: true
+mocap_bodies: "phone popillia"
+dump_bodies: true
+optitrack_repo: optitrack
+stop_confirm: false
+notify: true
+notify_repeat_s: 45
+
+# --- merge on the Mac --------------------------------------------------------------------
+merge_inline: true
+merge_fusion: pyramid
+merge_format: tif
+merge_jobs: 3
+merge_ref_index: -1
+merge_delete_raw: false
+merge_index_maps: false
+merge_max_pending: 5
+merge_python: ""
+
+# --- OneDrive ------------------------------------------------------------------------------
+upload_remote: "onedrive:SUPSI/rehearsal_{date}"
+upload_what: all
+upload_delete_local: true        # after merge + verified upload the whole local images/<image>/ folder goes (masters too, user 2026-09-30)
+upload_delete_phone: true
+upload_delete_session: false
+upload_rclone: rclone
+upload_transfers: 4
+upload_timeout_s: 7200

@@ -1,6 +1,7 @@
 """Runs inside the interpreter that has pymobiledevice3 (pipx venv or any env).
     python pull_worker.py list <bundle> <session>
     python pull_worker.py pull <bundle> <session> <images_dir> <sidecar_dir> <name> [<name> ...]
+    python pull_worker.py delete <bundle> <session> <name> [<name> ...]     (after a verified cloud upload only)
 Prints one JSON line with the result. Supports both the async API
 (pymobiledevice3 >= 5: `await create_using_usbmux()`, `HouseArrestService.create`)
 and the older sync one."""
@@ -49,6 +50,20 @@ async def main_async():
         if cmd == "list":
             names = await _call(afc.listdir, base)
             print(json.dumps({"files": sorted(names)}))
+            return
+        if cmd == "delete":
+            deleted, missing = [], []
+            rm = getattr(afc, "rm_single", None) or afc.rm
+            for name in sys.argv[4:]:
+                path = f"{base}/{name}"
+                if not await _call(afc.exists, path):
+                    missing.append(name)
+                    continue
+                await _call(rm, path)
+                if await _call(afc.exists, path):
+                    raise RuntimeError(f"still on the phone after rm: {name}")
+                deleted.append(name)
+            print(json.dumps({"deleted": deleted, "missing": missing}))
             return
         images_dir, sidecar_dir = sys.argv[4:6]
         out = []

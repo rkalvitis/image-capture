@@ -37,6 +37,17 @@ struct ContentView: View {
     @State private var lensSlider: Double = 0.25
 
     var body: some View {
+        if state.blackout {
+            // dataset session: pure black, nothing rendered or updated; long-press 2 s brings the UI back
+            Color.black.ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onLongPressGesture(minimumDuration: 2.0) { state.setBlackout(false) }
+        } else {
+            normalBody
+        }
+    }
+
+    private var normalBody: some View {
         GeometryReader { geo in
             let sideways = rotation % 180 != 0
             let w = sideways ? geo.size.height : geo.size.width

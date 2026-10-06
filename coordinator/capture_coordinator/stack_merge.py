@@ -7,7 +7,13 @@ per-frame fx ratio overpredicts this by ~25 %), so the frames of one stop
 differ in magnification. This module:
 
 1. decodes every DNG linearly (rawpy, sensor-native orientation, camera WB),
-2. aligns every frame to the REFERENCE frame (the frame at the init focus):
+2. boxes the beetle in EVERY frame (unwarped, half size; exposure.find_subject),
+   measures the focus inside the union of those boxes (variance of the
+   Laplacian, gain-normalised) and takes the frame where the beetle is
+   sharpest as the REFERENCE (anchor) frame (2026-10-06; before: the frame
+   at the init focus, which for `focus_mode: range` was just the middle of
+   the stack and often out of focus on the beetle),
+   then aligns every frame to the reference:
    a similarity per frame, estimated by ECC between NEIGHBOURING frames
    (similar blur) and chained to the reference, seeded by the intrinsics
    ratio fx_ref/fx_k about the principal point (`--align intrinsics` uses
@@ -65,13 +71,14 @@ try:
 except ImportError:                                            # pragma: no cover
     cv2 = None
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MERGED_COLUMNS = ["image", "file", "stop", "step", "pose", "ref_file", "ref_focus_index", "ref_lens_position",
                   "n_frames", "fx", "fy", "cx", "cy", "w", "h", "capture_time", "mocap_t0", "mocap_t1",
                   "phone_jitter_mm", "pop_jitter_mm", "phone_x", "phone_y", "phone_z", "phone_quat_xyzw",
                   "pop_x", "pop_y", "pop_z", "pop_quat_xyzw", "popillia_yaw_deg",
                   "cam_x", "cam_y", "cam_z", "quat_xyzw", "phone_world",
                   "decoder", "linear", "format", "fusion", "align", "align_max_shift_px", "align_min_cc", "seconds",
-                  "subject_box", "best_focus_index", "best_focus_lens", "sharpness_ref", "sharpness_best",
+                  "subject_box", "best_focus_index", "best_focus_lens", "sharpness_ref", "sharpness_best", "mask_method",
                   "raw_deleted_on_mac"]
 ALIGN_COLUMNS = ["stop", "image", "focus_index", "lens_position", "scale_pred", "scale_meas", "shift_px_pred_x",
                  "shift_px_pred_y", "shift_px_meas_x", "shift_px_meas_y", "cc", "method", "sharpness"]
@@ -128,6 +135,11 @@ def to_srgb(lin):
     return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(x, 1 / 2.4) - 0.055)
 
 
+def from_srgb(x):
+    x = np.clip(x, 0.0, 1.0)
+    return np.where(x <= 0.04045, x / 12.92, np.power((x + 0.055) / 1.055, 2.4))
+
+
 def to_srgb8(lin):
     return (to_srgb(lin) * 255.0 + 0.5).astype(np.uint8)
 
@@ -180,7 +192,7 @@ def _roi_mask(shape, roi):
     return m
 
 
-def align_stack(grays, intr, ref, small_scale, method="ecc", min_cc=0.3, roi=1.0):
+def align_stack(grays, intr, ref, small_scale, method="ecc", min_cc=0.3, roi=1.0, subject_mask=None):
     """grays: {k: grey float32 image at `small_scale` of full res}; intr: {k: fx..cy} full res.
     Returns ({k: A_full 3x3 frame->ref}, [alignment rows]).
 
@@ -195,6 +207,20 @@ def align_stack(grays, intr, ref, small_scale, method="ecc", min_cc=0.3, roi=1.0
     shape = next(iter(grays.values())).shape
     mask = _roi_mask(shape, roi)
     centre = (shape[1] / 2.0, shape[0] / 2.0)
+    C = Cinv = None
+    if subject_mask is not None and subject_mask.any():
+        # fit on the beetle only (2026-10-06): fitted on the whole frame (mostly background at another depth)
+        # the breathing scale was slightly wrong AT THE BEETLE -> it drifted ~0.4 px per frame (s19_p0)
+        ys, xs = np.nonzero(subject_mask)
+        centre = (float(xs.mean()), float(ys.mean()))     # the similarity keeps the beetle's centre exact
+        # ECC on the crop around the beetle, not masked on the whole frame (masked full-frame ECC: 3 min per stop)
+        m = 24
+        cy0, cy1 = max(0, int(ys.min()) - m), min(shape[0], int(ys.max()) + 1 + m)
+        cx0, cx1 = max(0, int(xs.min()) - m), min(shape[1], int(xs.max()) + 1 + m)
+        mask = subject_mask[cy0:cy1, cx0:cx1].astype(np.uint8) * 255
+        grays = {k: g[cy0:cy1, cx0:cx1] for k, g in grays.items()}
+        C = np.array([[1.0, 0.0, cx0], [0.0, 1.0, cy0], [0.0, 0.0, 1.0]])      # crop px -> frame px
+        Cinv = np.linalg.inv(C)
     M = {ref: np.eye(3)}          # ref -> k, small coords
     pair = {}
     for direction in (1, -1):
@@ -205,7 +231,11 @@ def align_stack(grays, intr, ref, small_scale, method="ecc", min_cc=0.3, roi=1.0
                 break
             P_ba = S @ np.linalg.inv(breathing_affine(intr[a], intr[b])) @ Sinv     # predicted b -> a
             if method == "ecc":
-                W, cc = _ecc_pair(grays[b], grays[a], P_ba, mask=mask)
+                if C is None:
+                    W, cc = _ecc_pair(grays[b], grays[a], P_ba, mask=mask)
+                else:
+                    W, cc = _ecc_pair(grays[b], grays[a], Cinv @ P_ba @ C, mask=mask)
+                    W = C @ W @ Cinv
                 used = "ecc"
                 if cc is None or cc < min_cc:
                     W, used = P_ba, "intrinsics(fallback)"
@@ -233,9 +263,49 @@ def align_stack(grays, intr, ref, small_scale, method="ecc", min_cc=0.3, roi=1.0
     return A_full, out
 
 
+def focus_depth_map(grays, A, ref, small_scale, sigma=2.0, fill_sigma=24.0, reach=7):
+    """Per pixel of the reference (alignment-scale px): the focus index of the photo that is sharpest there.
+    Energy = blurred |Laplacian| of the UNWARPED grey, then warped (warping first would favour the reference).
+    Next to a contrast edge the DEFOCUSED photos have the most energy (their blur reaches past the edge), so
+    every pixel takes the index of the strongest pixel within `reach` px: the edge itself, in its sharp photo.
+    Pixels without texture (foam, background) carry no information: they take the confidence-weighted
+    average of their surroundings, so the foam next to the outline gets the outline's depth.
+    Returns (depth float32, known bool); depth is NaN-free, `known` False where nothing textured is near."""
+    S = np.diag([small_scale, small_scale, 1.0])
+    Sinv = np.linalg.inv(S)
+    h, w = next(iter(grays.values())).shape
+    emax = np.full((h, w), -1.0, np.float32)
+    idx = np.zeros((h, w), np.float32)
+    for k in sorted(grays):
+        e = cv2.GaussianBlur(np.abs(cv2.Laplacian(grays[k], cv2.CV_32F, ksize=3)), (0, 0), sigma)
+        if k != ref:
+            e = cv2.warpAffine(e, (S @ A[k] @ Sinv)[:2].astype(np.float32), (w, h), flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=-1.0)
+        better = e > emax
+        emax[better] = e[better]
+        idx[better] = k
+    # dilate (energy, index) together: the energy is quantised into the high part, the index rides in the low part
+    q = np.floor(np.clip(emax, 0.0, None) / max(float(emax.max()), 1e-12) * 32767.0)
+    code = cv2.dilate((q * 128.0 + idx).astype(np.float32), cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * reach + 1, 2 * reach + 1)))
+    idx = np.mod(code, 128.0).astype(np.float32)
+    idx = cv2.medianBlur(idx, 5)                             # single-pixel wins are noise
+    floor = float(np.percentile(emax, 50))                   # most of the frame is foam/background = the noise floor
+    conf = np.clip(emax - 2.0 * floor, 0.0, None)
+    num, den = cv2.GaussianBlur(idx * conf, (0, 0), sigma), cv2.GaussianBlur(conf, (0, 0), sigma)
+    numf, denf = cv2.GaussianBlur(idx * conf, (0, 0), fill_sigma), cv2.GaussianBlur(conf, (0, 0), fill_sigma)
+    eps = 1e-3 * float(conf.max() or 1.0)
+    depth = np.where(den > eps, num / np.maximum(den, 1e-12), numf / np.maximum(denf, 1e-12)).astype(np.float32)
+    return depth, denf > 0.02 * eps
+
+
 def warp_to_ref(img, A, w, h):
-    out = cv2.warpAffine(img, A[:2].astype(np.float32), (w, h), flags=cv2.INTER_LINEAR,
+    # Lanczos, not bilinear: a bilinear warp keeps only 0.47-0.64 of the fine detail (measured 2026-10-06 on
+    # s18_p12, Lanczos 0.89-0.95), so the never-warped reference won the max-energy fusion wherever it was
+    # not far out of focus and every other frame arrived softened.
+    out = cv2.warpAffine(img, A[:2].astype(np.float32), (w, h), flags=cv2.INTER_LANCZOS4,
                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    np.maximum(out, 0.0, out=out)                     # Lanczos overshoot at edges
     ones = np.ones(img.shape[:2], np.float32)
     valid = cv2.warpAffine(ones, A[:2].astype(np.float32), (w, h), flags=cv2.INTER_NEAREST,
                            borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.5
@@ -270,6 +340,31 @@ class PyramidFuser:
     def __init__(self, levels=6, energy_ksize=9, **_):
         self.levels, self.ks = levels, energy_ksize
         self.best = self.energy = self.base_n = self.index_map = None
+        self.guard = None
+
+    def set_depth_guard(self, depth, known, radius, spread=9):
+        """Only photos within `radius` focus steps of the pixel's own sharpest photo (focus_depth_map) may win a
+        coefficient. Without it every level picks independently, and at the coarse levels the DEFOCUSED photos
+        win around every contrast edge: a grey band along the outline, dust grains drawn as stars (2026-10-06).
+        The allowed range is the min..max depth of the neighbourhood (wider at coarse levels), so both sides
+        of a depth step (a leg in front of the body) stay available."""
+        self.guard = (depth, known, float(radius), spread)
+        self._guard_lvl = {}
+
+    def _allowed(self, lvl, shape, index):
+        if self.guard is None:
+            return None
+        if lvl not in self._guard_lvl:
+            depth, known, r, spread = self.guard
+            k = spread * (2 ** max(0, lvl - 1)) | 1
+            ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+            lo = np.where(known, cv2.erode(depth, ker) - r, -1e9).astype(np.float32)
+            hi = np.where(known, cv2.dilate(depth, ker) + r, 1e9).astype(np.float32)
+            size = (shape[1], shape[0])
+            self._guard_lvl[lvl] = (cv2.resize(lo, size, interpolation=cv2.INTER_NEAREST),
+                                    cv2.resize(hi, size, interpolation=cv2.INTER_NEAREST))
+        lo, hi = self._guard_lvl[lvl]
+        return (index >= lo) & (index <= hi)
 
     def add(self, img, valid, index):
         pyr = laplacian_pyramid(img, self.levels)
@@ -291,6 +386,9 @@ class PyramidFuser:
                     self.base_n[ok] += 1
                 continue
             e = cv2.GaussianBlur(np.abs(lap).sum(axis=2), (self.ks, self.ks), 0)
+            allowed = self._allowed(lvl, lap.shape, index)
+            if allowed is not None:
+                e = np.where(allowed, e, e * 1e-6)           # still beats "no photo covers this pixel" (-1)
             e = np.where(ok, e, -1.0).astype(np.float32)
             if first:
                 self.best[lvl], self.energy[lvl] = lap.copy(), e
@@ -411,8 +509,8 @@ def make_fuser(fusion, levels, consistency=1):
 # ---------------------------------------------------------------------------
 # session handling (both layouts)
 def load_frames(session_dir):
-    with open(os.path.join(session_dir, "frames.csv")) as f:
-        rows = list(csv.DictReader(f))
+    from .session import read_frames_csv                 # tolerates a header-less frames.csv (2026-09-30)
+    rows = read_frames_csv(os.path.join(session_dir, "frames.csv"))
     stops = {}
     for r in rows:
         stops.setdefault(int(r["stop"]), []).append(r)
@@ -427,6 +525,8 @@ def layout_of(rows):
 
 
 def frame_path(session_dir, row):
+    if row.get("raw_dir"):                           # the cloud layout: every DNG + sidecar flat in one folder (raw/)
+        return os.path.join(row["raw_dir"], row["file"])
     if row.get("image"):
         return os.path.join(session_dir, "images", row["image"], "stack", row["file"])
     return os.path.join(session_dir, "images", row["file"])
@@ -434,18 +534,32 @@ def frame_path(session_dir, row):
 
 def sidecar_path(session_dir, row):
     base = os.path.splitext(row["file"])[0] + ".json"
+    if row.get("raw_dir"):
+        return os.path.join(row["raw_dir"], base)
     if row.get("image"):
         return os.path.join(session_dir, "images", row["image"], "stack", base)
     return os.path.join(session_dir, "sidecars", base)
 
 
-def choose_reference(frames, ref_index=None):
+def sharpest_index(sharpness):
+    """Focus index with the highest beetle sharpness, after a 3-tap mean over
+    neighbouring focus indices (one noisy frame must not win)."""
+    ks = sorted(sharpness)
+    sm = {k: np.mean([sharpness[j] for j in (ks[max(0, i - 1)], k, ks[min(len(ks) - 1, i + 1)])])
+          for i, k in enumerate(ks)}
+    return max(sm, key=sm.get)
+
+
+def choose_reference(frames, ref_index=None, sharpness=None):
     """Reference focus index for a stop: `ref_index` if given (>= 0), else the
-    frame whose lens position is the init focus (frames.csv focus_centre),
-    else the middle of the stack."""
+    frame where the beetle is sharpest (`sharpness` from beetle_sharpness),
+    else the frame whose lens position is the init focus (frames.csv
+    focus_centre), else the middle of the stack."""
     by_idx = {int(r["focus_index"]): r for r in frames}
     if ref_index is not None and ref_index >= 0:
         return ref_index if ref_index in by_idx else min(by_idx, key=lambda i: abs(i - ref_index))
+    if sharpness:
+        return sharpest_index({k: v for k, v in sharpness.items() if k in by_idx})
     centres = [r.get("focus_centre") for r in frames if r.get("focus_centre") not in (None, "")]
     if centres:
         c = float(centres[0])
@@ -469,13 +583,97 @@ def subject_sharpness(img, box):
     return float(cv2.Laplacian(g, cv2.CV_32F, ksize=3).var())
 
 
-def _aligned_frames(paths, A, ref_idx, half, box, measure=True):
-    """Generator: (k, aligned linear float32 image, valid mask). Every frame is
-    gained to the median of the first frame decoded (locked exposure -> ~1).
-    With `measure` the beetle box is found on the first frame (dark blob
-    surrounded by white foam, exposure.find_subject) and the sharpness of
-    every aligned frame inside it is stored in box["sharpness"][k]."""
+def beetle_sharpness(greys, dark_frac=0.6, edge_px=6):
+    """greys: {k: unwarped grey image, each divided by its own median}.
+    1. boxes the beetle in every frame (exposure.find_subject), drops boxes whose
+       centre is far from the median centre, union box (padded);
+    2. MASK of the beetle itself: per frame the pixels inside the box darker than
+       `dark_frac` x the surroundings (median of the box's border pixels: foam or
+       grey background, never the beetle; not a high percentile, the bright foam
+       rim made the grey background count as beetle), opened to cut the pin,
+       largest blob; OR over all frames (defocused frames are wider), dilated by
+       `edge_px` so the outline against the foam counts;
+    3. sharpness per frame = variance of the Laplacian over the mask pixels only.
+    Returns (box (y0, y1, x0, x1) in the greys' pixels or None, mask (uint8, box-sized) or None, {k: sharpness})."""
     from .exposure import find_subject
+    boxes = [b for b in (find_subject(g) for g in greys.values()) if b is not None]
+    if not boxes:
+        return None, None, {}
+    B = np.array(boxes, float)
+    cy, cx = (B[:, 0] + B[:, 1]) / 2, (B[:, 2] + B[:, 3]) / 2
+    size = max(1.0, float(np.median(np.maximum(B[:, 1] - B[:, 0], B[:, 3] - B[:, 2]))))
+    keep = np.hypot(cy - np.median(cy), cx - np.median(cx)) <= 0.5 * size
+    if keep.any():
+        B = B[keep]
+    h, w = next(iter(greys.values())).shape
+    pad = max(10, int(0.1 * size))
+    box = (max(0, int(B[:, 0].min()) - pad), min(h, int(B[:, 1].max()) + pad),
+           max(0, int(B[:, 2].min()) - pad), min(w, int(B[:, 3].max()) + pad))
+    ko = max(3, int(0.08 * size)) | 1                 # opening: removes the pin (thin), keeps the body
+    open_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ko, ko))
+    mask = None
+    for g in greys.values():
+        sub = cv2.GaussianBlur(g[box[0]:box[1], box[2]:box[3]], (0, 0), 1.0)
+        white = float(np.median(np.concatenate([sub[0], sub[-1], sub[:, 0], sub[:, -1]])))
+        m = cv2.morphologyEx((sub < dark_frac * white).astype(np.uint8), cv2.MORPH_OPEN, open_k)
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(m)
+        if n < 2:
+            continue
+        m = (lab == 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))).astype(np.uint8)
+        mask = m if mask is None else (mask | m)
+    if mask is None or mask.sum() < 100:
+        mask = np.ones((box[1] - box[0], box[3] - box[2]), np.uint8)     # no blob: whole box
+    else:
+        mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * edge_px + 1, 2 * edge_px + 1)))
+    return box, mask, score_in_mask(greys, box, mask)
+
+
+def score_in_mask(greys, box, mask):
+    """{k: variance of the Laplacian (OpenCV, ksize 3) of greys[k] over the mask pixels}; mask is box-sized."""
+    sel = mask > 0
+    return {k: float(cv2.Laplacian(g[box[0]:box[1], box[2]:box[3]], cv2.CV_32F, ksize=3)[sel].var())
+            for k, g in greys.items()}
+
+
+def sam3_beetle_mask(rgb, session_dir, python=None, prompt="insect", pad=10):
+    """SAM 3 text-prompt mask of the beetle on one linear RGB frame (sam3_mask.py in
+    the optitrack `masking` env, one SAM 3 process at a time: session_dir/sam3.lock).
+    Returns (box (y0, y1, x0, x1), box-sized uint8 mask, full-frame uint8 mask, info) or (None, None, None, info)."""
+    from .sam3_mask import masking_python
+    py = python or masking_python(os.path.join(REPO_ROOT, "optitrack"))
+    info = {"method": "sam3", "prompt": prompt}
+    if not py or not os.path.exists(py):
+        info["error"] = f"no SAM 3 interpreter {py or ''} (pixi install -e masking in optitrack/)"
+        return None, None, None, info
+    with tempfile.TemporaryDirectory() as td:
+        src, dst = os.path.join(td, "in.jpg"), os.path.join(td, "out.png")
+        cv2.imwrite(src, cv2.cvtColor(to_srgb8(rgb), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
+        env = dict(os.environ, PYTHONPATH=os.path.join(REPO_ROOT, "coordinator"))
+        t = time.time()
+        with _CsvLock(os.path.join(session_dir, "sam3")):
+            r = subprocess.run([py, "-m", "capture_coordinator.sam3_mask", "--prompt", prompt, src, dst],
+                               capture_output=True, text=True, env=env, timeout=900)
+        info["seconds"] = round(time.time() - t, 1)
+        res = next((json.loads(l) for l in reversed(r.stdout.splitlines()) if l.startswith("{")), None)
+        if r.returncode != 0 or res is None or res.get("score") is None:
+            info["error"] = (r.stderr.strip().splitlines() or ["no instance found"])[-1][:300] if res is None \
+                else f"no '{prompt}' found"
+            return None, None, None, info
+        full = (cv2.imread(dst, cv2.IMREAD_GRAYSCALE) > 127).astype(np.uint8)
+    info["score"] = res["score"]
+    ys, xs = np.nonzero(full)
+    if len(ys) < 100:
+        info["error"] = "mask too small"
+        return None, None, None, info
+    h, w = full.shape
+    box = (max(0, int(ys.min()) - pad), min(h, int(ys.max()) + 1 + pad),
+           max(0, int(xs.min()) - pad), min(w, int(xs.max()) + 1 + pad))
+    return box, full[box[0]:box[1], box[2]:box[3]].copy(), full, info
+
+
+def _aligned_frames(paths, A, ref_idx, half, box):
+    """Generator: (k, aligned linear float32 image, valid mask). Every frame is
+    gained to the median of the first frame decoded (locked exposure -> ~1)."""
     h = w = None
     for k in sorted(paths):
         img, decoder, linear = decode_dng(paths[k], half=half)
@@ -492,42 +690,83 @@ def _aligned_frames(paths, A, ref_idx, half, box, measure=True):
             valid = np.ones((h, w), bool)
         else:
             img, valid = warp_to_ref(img, A[k], w, h)
-        if measure and "subject_box" not in box:
-            g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            b = find_subject(g)
-            if b is not None:                                   # pad the box: other frames are blurrier / shifted
-                pad = max(20, (b[1] - b[0]) // 8)
-                b = (max(0, b[0] - pad), min(h, b[1] + pad), max(0, b[2] - pad), min(w, b[3] + pad))
-            box["subject_box"] = b
-            box["sharpness"] = {}
-        if measure and box.get("subject_box") is not None and k not in box["sharpness"]:
-            box["sharpness"][k] = subject_sharpness(img, box["subject_box"])
         yield k, img, valid
 
 
+def _encoded(frames, space):
+    """Aligned frames in the fusion space: linear as decoded, or sRGB-encoded (the beetle sits at ~1 % linear
+    next to foam at 80 %: in linear the foam edge outweighs every detail of the body)."""
+    for k, img, valid in frames:
+        yield k, (to_srgb(img).astype(np.float32) if space == "srgb" else img), valid
+
+
 def merge_stop(session_dir, rows, ref_index, align="ecc", levels=6, half=False, small_scale=0.5, roi=1.0,
-               fusion="pyramid", consistency=1):
-    """Merge one stop. Returns (linear float image, info dict)."""
+               fusion="pyramid", consistency=1, mask="threshold", sam3_python=None, sam3_prompt="insect",
+               align_on="beetle", min_rel_sharpness=0.0, depth_guard=0.0, fusion_space="linear"):
+    """Merge one stop. Returns (linear float image, info dict).
+    fusion_space: linear | srgb = the encoding the fusion compares and blends in (the result is linear either way).
+    depth_guard: pyramid fusion only; > 0 = a pixel takes its detail only from photos within this many focus
+    steps of its own sharpest photo (PyramidFuser.set_depth_guard); 0 = every photo competes everywhere.
+    align_on: beetle = fit the alignment on the beetle mask (dilated), frame = whole frame / `roi`.
+    min_rel_sharpness: drop frames whose beetle score is below this fraction of the peak (0 = keep all)."""
     frames = [r for r in rows if os.path.exists(frame_path(session_dir, r))]
     if not frames:
         raise FileNotFoundError("no images for this stop")
     t0 = time.time()
     by_idx = {int(r["focus_index"]): r for r in frames}
-    ref_idx = choose_reference(frames, ref_index)
     div = 2.0 if half else 1.0
     intr = {k: {kk: v / div for kk, v in intrinsics_of(r, session_dir).items()} for k, r in by_idx.items()}
     paths = {k: frame_path(session_dir, r) for k, r in by_idx.items()}
 
-    # pass 0: small greys for the alignment (decode at half size, then shrink)
-    grays = {}
+    # pass 0: half-size greys -> beetle box + sharpness per UNWARPED frame (picks the reference),
+    # then shrunk for the alignment
+    grays, halfs = {}, {}
     for k in sorted(by_idx):
         img, _, _ = decode_dng(paths[k], half=True)
         g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        med = float(np.median(g))
+        halfs[k] = g / med if med > 0 else g
         f = 2.0 * small_scale / div        # half-size decode = 0.5 of full = div/2 of the output; want small_scale of the output
         if abs(f - 1.0) > 1e-6:
             g = cv2.resize(g, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
         grays[k] = g
-    A, align_rows = align_stack(grays, intr, ref_idx, small_scale, method=align, roi=roi)
+    hbox, hmask, sharp = beetle_sharpness(halfs)
+    mask_info, sam_full = {"method": "threshold"}, None
+    if mask == "sam3":
+        # SAM 3 on the provisional sharpest frame (threshold mask): its outline is the crispest
+        k0 = choose_reference(frames, -1, sharp)
+        rgb, _, _ = decode_dng(paths[k0], half=True)
+        b, m, sam_full, mask_info = sam3_beetle_mask(rgb, session_dir, sam3_python, sam3_prompt)
+        mask_info["frame"] = k0
+        if b is not None:
+            hbox, hmask, sharp = b, m, score_in_mask(halfs, b, m)
+        else:
+            mask_info["fallback"] = "threshold"
+    del halfs
+    ref_idx = choose_reference(frames, ref_index, sharp)
+    s = 2.0 / div                                          # half-size px -> output px
+    subject_box = None if hbox is None else [int(round(v * s)) for v in hbox]
+    dropped = []
+    if min_rel_sharpness > 0 and sharp:
+        peak = max(sharp.values())
+        dropped = sorted(k for k, v in sharp.items() if v < min_rel_sharpness * peak and k != ref_idx)
+        keep = [k for k in sorted(by_idx) if k not in dropped]   # contiguous in practice (one focus peak)
+        for k in dropped:
+            by_idx.pop(k); paths.pop(k); grays.pop(k); intr.pop(k)
+        frames = [r for r in frames if int(r["focus_index"]) in by_idx]
+    subject_mask = None
+    if align_on == "beetle" and hbox is not None and hmask is not None and not hmask.all():
+        full = np.zeros(next(iter(grays.values())).shape[:2], np.uint8)
+        f2 = 2.0 * small_scale / div                       # half-size px -> alignment (small) px (as the greys)
+        mb = cv2.resize(hmask, None, fx=f2, fy=f2, interpolation=cv2.INTER_NEAREST)
+        y0, x0 = int(round(hbox[0] * f2)), int(round(hbox[2] * f2))
+        mb = mb[:full.shape[0] - y0, :full.shape[1] - x0]
+        full[y0:y0 + mb.shape[0], x0:x0 + mb.shape[1]] = mb
+        subject_mask = cv2.dilate(full, np.ones((15, 15), np.uint8)) > 0
+    A, align_rows = align_stack(grays, intr, ref_idx, small_scale, method=align, roi=roi, subject_mask=subject_mask)
+    depth = None
+    if depth_guard > 0 and fusion == "pyramid":
+        depth = focus_depth_map(grays, A, ref_idx, small_scale)
     del grays
     for a in align_rows:
         a["stop"] = int(frames[0]["stop"]); a["lens_position"] = by_idx[a["focus_index"]]["lens_position"]
@@ -536,33 +775,38 @@ def merge_stop(session_dir, rows, ref_index, align="ecc", levels=6, half=False, 
 
     # fusion passes
     fuser = make_fuser(fusion, levels, consistency)
+    if depth is not None:
+        fuser.set_depth_guard(depth[0], depth[1], depth_guard)
     box = {}
     if fuser.passes == 2:
-        for k, img, valid in _aligned_frames(paths, A, ref_idx, half, box):
+        for k, img, valid in _encoded(_aligned_frames(paths, A, ref_idx, half, box), fusion_space):
             fuser.add_energy(img, valid, k)
         fuser.decide()
-        for k, img, valid in _aligned_frames(paths, A, ref_idx, half, box):
+        for k, img, valid in _encoded(_aligned_frames(paths, A, ref_idx, half, box), fusion_space):
             fuser.add_colour(img, valid, k)
     else:
-        for k, img, valid in _aligned_frames(paths, A, ref_idx, half, box):
+        for k, img, valid in _encoded(_aligned_frames(paths, A, ref_idx, half, box), fusion_space):
             fuser.add(img, valid, k)
     merged = fuser.result()
+    if fusion_space == "srgb":
+        merged = from_srgb(merged).astype(np.float32)
     h, w = box["hw"]
-    sharp = box.get("sharpness") or {}
     for a in align_rows:
         a["sharpness"] = round(sharp[a["focus_index"]], 6) if a["focus_index"] in sharp else ""
-    best_k = max(sharp, key=sharp.get) if sharp else None
+    best_k = sharpest_index(sharp) if sharp else None
     ccs = [a["cc"] for a in align_rows if a["cc"] != ""]
     shifts = [np.hypot(a["shift_px_meas_x"] - a["shift_px_pred_x"], a["shift_px_meas_y"] - a["shift_px_pred_y"])
               for a in align_rows]
     info = {"ref_row": by_idx[ref_idx], "ref_intr": intr[ref_idx], "n_frames": len(frames), "decoder": box["decoder"],
-            "linear": box["linear"], "align": align if roi >= 0.999 else f"{align}(roi {roi:g})",
+            "linear": box["linear"], "align": f"{align}(beetle)" if subject_mask is not None else align if roi >= 0.999 else f"{align}(roi {roi:g})",
             "align_rows": align_rows, "index_map": fuser.index_map, "fusion": fusion,
             "align_max_shift_px": float(max(shifts)) if shifts else 0.0,
             "align_min_cc": float(min(ccs)) if ccs else None, "seconds": time.time() - t0,
             "seconds_align": t_align, "w": w, "h": h, "lens_positions": [by_idx[k]["lens_position"] for k in sorted(by_idx)],
             "files": [by_idx[k]["file"] for k in sorted(by_idx)],
-            "subject_box": box.get("subject_box"), "sharpness": {int(k): v for k, v in sharp.items()},
+            "align_on": "beetle" if subject_mask is not None else "frame", "dropped_frames": dropped,
+            "fusion_space": fusion_space, "depth_guard": depth_guard if depth is not None else 0.0, "depth_map": None if depth is None else depth[0],
+            "subject_box": subject_box, "beetle_mask": hmask, "mask_info": mask_info, "sam3_mask": sam_full, "beetle_box_half": hbox, "sharpness": {int(k): v for k, v in sharp.items()},
             "best_focus_index": best_k, "best_focus_lens": float(by_idx[best_k]["lens_position"]) if best_k is not None else None,
             "sharpness_ref": sharp.get(ref_idx), "sharpness_best": sharp.get(best_k) if best_k is not None else None}
     return merged, info
@@ -608,7 +852,12 @@ def _merge_one(job):
     path = os.path.join(out_dir, name)
     try:
         merged, info = merge_stop(session_dir, rows, job["ref_index"], align=job["align"], levels=job["levels"],
-                                  half=job["half"], roi=job["roi"], fusion=job["fusion"], consistency=job["consistency"])
+                                  half=job["half"], roi=job["roi"], fusion=job["fusion"], consistency=job["consistency"],
+                                  mask=job.get("mask", "threshold"), sam3_python=job.get("sam3_python"),
+                                  sam3_prompt=job.get("sam3_prompt", "insect"), align_on=job.get("align_on", "beetle"),
+                                  min_rel_sharpness=job.get("min_rel_sharpness", 0.0),
+                                  depth_guard=job.get("depth_guard", 0.0),
+                                  fusion_space=job.get("fusion_space", "linear"))
     except FileNotFoundError as err:
         return stop, None, str(err)
     os.makedirs(out_dir, exist_ok=True)
@@ -620,6 +869,18 @@ def _merge_one(job):
     if job["index_maps"] and info["index_map"] is not None:
         im = np.clip(info["index_map"].astype(np.float32) / max(1, info["n_frames"] - 1) * 255.0, 0, 255)
         cv2.imwrite(os.path.join(stack_dir, (image or f"MERGED_{stop:04d}") + "_index.png"), im.astype(np.uint8))
+    if info["beetle_mask"] is not None:                # half-size mask the reference was chosen on (check it)
+        y0, y1, x0, x1 = info["beetle_box_half"]
+        g = cv2.cvtColor(to_srgb8(cv2.resize(merged, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+                                  if not job["half"] else merged), cv2.COLOR_RGB2BGR)[y0:y1, x0:x1].copy()
+        edge = info["beetle_mask"] - cv2.erode(info["beetle_mask"], np.ones((3, 3), np.uint8))
+        g[edge > 0] = (0, 0, 255)
+        cv2.imwrite(os.path.join(stack_dir, (image or f"MERGED_{stop:04d}") + "_beetle_mask.png"), g)
+    if info["depth_map"] is not None:                  # which photo is sharpest where (0 = first, 255 = last)
+        dm = np.clip(info["depth_map"] / max(1, max(info["sharpness"] or [1])) * 255.0, 0, 255)
+        cv2.imwrite(os.path.join(stack_dir, (image or f"MERGED_{stop:04d}") + "_depth.png"), dm.astype(np.uint8))
+    if info["sam3_mask"] is not None:                  # the SAM 3 mask itself (half size, 255 = insect)
+        cv2.imwrite(os.path.join(stack_dir, (image or f"MERGED_{stop:04d}") + "_sam3_mask.png"), info["sam3_mask"] * 255)
     rr, ri = info["ref_row"], info["ref_intr"]
     row = {c: rr.get(c, "") for c in MERGED_COLUMNS}
     row.update({"image": image, "file": name, "stop": stop, "ref_file": rr["file"], "ref_focus_index": rr["focus_index"],
@@ -634,7 +895,8 @@ def _merge_one(job):
                 "best_focus_index": "" if info["best_focus_index"] is None else info["best_focus_index"],
                 "best_focus_lens": "" if info["best_focus_lens"] is None else f"{info['best_focus_lens']:.4f}",
                 "sharpness_ref": "" if info["sharpness_ref"] is None else f"{info['sharpness_ref']:.6f}",
-                "sharpness_best": "" if info["sharpness_best"] is None else f"{info['sharpness_best']:.6f}"})
+                "sharpness_best": "" if info["sharpness_best"] is None else f"{info['sharpness_best']:.6f}",
+                "mask_method": info["mask_info"]["method"] + ("(failed->threshold)" if info["mask_info"].get("fallback") else "")})
     verified = os.path.getsize(path) > 10000 and _verify_image(path, info["h"], info["w"])
     if job["delete_raw"] and verified:
         # the MAC copies only (the phone keeps every frame); sidecars stay
@@ -652,7 +914,9 @@ def _merge_one(job):
                    "files": info["files"], "decoder": info["decoder"], "linear_decode": bool(info["linear"]),
                    "seconds": round(info["seconds"], 1), "seconds_align": round(info["seconds_align"], 1),
                    "align_max_shift_px": info["align_max_shift_px"], "align_min_cc": info["align_min_cc"],
-                   "subject_box": info["subject_box"], "sharpness_by_focus_index": info["sharpness"],
+                   "subject_box": info["subject_box"], "beetle_mask": info["mask_info"],
+                   "align_on": info["align_on"], "dropped_frames": info["dropped_frames"],
+                   "depth_guard": info["depth_guard"], "fusion_space": info["fusion_space"], "sharpness_by_focus_index": info["sharpness"],
                    "best_focus_index": info["best_focus_index"], "best_focus_lens": info["best_focus_lens"],
                    "verified": bool(verified), "raw_deleted_on_mac": bool(row["raw_deleted_on_mac"]),
                    "alignment": info["align_rows"], "frames": rows}
@@ -681,14 +945,28 @@ class _CsvLock:
         self.f = None
 
     def __enter__(self):
-        import fcntl
         self.f = open(self.path, "w")
-        fcntl.flock(self.f, fcntl.LOCK_EX)
+        if os.name == "nt":                          # Windows has no fcntl
+            import msvcrt
+            while True:
+                try:
+                    msvcrt.locking(self.f.fileno(), msvcrt.LK_LOCK, 1)     # retries for 10 s, then OSError
+                    break
+                except OSError:
+                    continue
+        else:
+            import fcntl
+            fcntl.flock(self.f, fcntl.LOCK_EX)
         return self
 
     def __exit__(self, *a):
-        import fcntl
-        fcntl.flock(self.f, fcntl.LOCK_UN)
+        if os.name == "nt":
+            import msvcrt
+            self.f.seek(0)
+            msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(self.f, fcntl.LOCK_UN)
         self.f.close()
 
 
@@ -767,7 +1045,8 @@ def merged_path(session_dir, out_name, row):
 
 def merge_session(session_dir, ref_index, out_name="merged", fmt="tif", align="ecc", stops=None,
                   levels=6, half=False, index_maps=False, jobs=1, log=print, delete_raw=False, roi=1.0,
-                  fusion="pyramid", preview=None, consistency=1):
+                  fusion="pyramid", preview=None, consistency=1, mask="threshold", sam3_python=None, sam3_prompt="insect",
+                  align_on="beetle", min_rel_sharpness=0.0, depth_guard=0.0, fusion_space="linear"):
     if cv2 is None:
         raise RuntimeError("opencv (cv2) is required: pip install -r coordinator/requirements-merge.txt")
     all_stops = load_frames(session_dir)
@@ -795,7 +1074,10 @@ def merge_session(session_dir, ref_index, out_name="merged", fmt="tif", align="e
     todo = [s for s in todo if not (s in done and os.path.exists(merged_path(session_dir, out_name, done[s])))]
     jobs_args = [{"session_dir": session_dir, "stop": s, "rows": all_stops[s], "ref_index": ref_index, "out_dir": out_dir,
                   "fmt": fmt, "align": align, "levels": levels, "half": half, "index_maps": index_maps,
-                  "delete_raw": delete_raw, "roi": roi, "fusion": fusion, "preview": preview, "consistency": consistency}
+                  "delete_raw": delete_raw, "roi": roi, "fusion": fusion, "preview": preview, "consistency": consistency,
+                  "mask": mask, "sam3_python": sam3_python, "sam3_prompt": sam3_prompt,
+                  "align_on": align_on, "min_rel_sharpness": min_rel_sharpness, "depth_guard": depth_guard,
+                  "fusion_space": fusion_space}
                  for s in todo]
     log(f"{len(todo)} stop(s) to merge ({layout} layout, {fusion} fusion, {fmt}; {len(done)} already done), {jobs} job(s)")
 
@@ -826,8 +1108,22 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("session_dir", help="session/dataset folder written by the coordinator")
     ap.add_argument("--ref-index", type=int, default=None,
-                    help="fixed reference focus index for every stop (default: per stop the frame at the init focus "
-                         "= frames.csv focus_centre, else the middle of the stack)")
+                    help="fixed reference focus index for every stop (default: per stop the frame where the beetle "
+                         "is sharpest; if no beetle is found, the init-focus frame, else the middle of the stack)")
+    ap.add_argument("--mask", choices=["threshold", "sam3"], default="threshold",
+                    help="beetle mask for the focus measure that picks the reference: threshold = dark silhouette "
+                         "(fast); sam3 = SAM 3 text prompt on the provisional sharpest frame (optitrack `masking` env, ~15 s)")
+    ap.add_argument("--sam3-python", default=None, help="interpreter with SAM 3 (default: optitrack/.pixi/envs/masking)")
+    ap.add_argument("--sam3-prompt", default="insect")
+    ap.add_argument("--align-on", choices=["beetle", "frame"], default="beetle",
+                    help="fit the alignment on the beetle mask (default) or on the whole frame (before 2026-10-06)")
+    ap.add_argument("--depth-guard", type=float, default=0.0,
+                    help="pyramid fusion: a pixel takes detail only from photos within this many focus steps of its "
+                         "own sharpest photo (0 = off; removes the band along the outline and the star-shaped dust)")
+    ap.add_argument("--fusion-space", choices=["linear", "srgb"], default="linear",
+                    help="encoding the fusion compares and blends in; the written image is the same format either way")
+    ap.add_argument("--min-rel-sharpness", type=float, default=0.0,
+                    help="drop frames whose beetle score is below this fraction of the peak (0 = keep all 50)")
     ap.add_argument("--fusion", choices=FUSIONS, default="pyramid",
                     help="pyramid = Laplacian pyramid max energy (A); wavelet = complex-wavelet max modulus, Forster 2004 (B)")
     ap.add_argument("--consistency", type=int, default=1, choices=[0, 1, 2],
@@ -859,10 +1155,13 @@ def main(argv=None):
     n = max(len(v) for v in stops.values())
     ref = a.ref_index
     print(f"{len(stops)} stops, up to {n} frames each; reference = "
-          + (f"focus index {ref}" if ref is not None else "the init-focus frame of each stop (focus_centre)"))
+          + (f"focus index {ref}" if ref is not None and ref >= 0 else "the frame where the beetle is sharpest, per stop"))
     path = merge_session(a.session_dir, ref, a.out, a.format, a.align, a.stops, a.levels, half=a.half,
                          index_maps=a.index_maps, jobs=a.jobs, delete_raw=a.delete_raw, roi=a.roi,
-                         fusion=a.fusion, preview=a.preview or None, consistency=a.consistency)
+                         fusion=a.fusion, preview=a.preview or None, consistency=a.consistency,
+                         mask=a.mask, sam3_python=a.sam3_python, sam3_prompt=a.sam3_prompt,
+                         align_on=a.align_on, min_rel_sharpness=a.min_rel_sharpness, depth_guard=a.depth_guard,
+                         fusion_space=a.fusion_space)
     print(f"wrote {path}")
 
 
